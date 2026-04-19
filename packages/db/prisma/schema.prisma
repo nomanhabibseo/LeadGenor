@@ -1,0 +1,264 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum TatUnit {
+  HOURS
+  DAYS
+}
+
+enum DealStatus {
+  DEAL_DONE
+  PENDING
+}
+
+enum PaymentTerms {
+  ADVANCE
+  AFTER_LIVE_LINK
+}
+
+enum LinkType {
+  GUEST_POST
+  NICHE_EDIT
+}
+
+enum OrderStatus {
+  COMPLETED
+  PENDING
+}
+
+model User {
+  id                 String   @id @default(cuid())
+  email              String   @unique
+  passwordHash       String?
+  name               String?
+  trashRetentionDays Int      @default(28)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  vendors Vendor[]
+  clients Client[]
+  orders  Order[]
+}
+
+model Currency {
+  id            String         @id @default(cuid())
+  code          String         @unique
+  symbol        String
+  name          String
+  sortOrder     Int            @default(0)
+  vendors       Vendor[]
+  orders        Order[]
+  exchangeRates ExchangeRate[]
+}
+
+model Niche {
+  id       String         @id @default(cuid())
+  slug     String         @unique
+  label    String
+  sortOrder Int           @default(0)
+  vendors  VendorNiche[]
+  clients  ClientNiche[]
+}
+
+model Country {
+  id       String          @id @default(cuid())
+  code     String          @unique
+  name     String
+  sortOrder Int            @default(0)
+  vendors  VendorCountry[]
+  clients  ClientCountry[]
+}
+
+model Language {
+  id      String   @id @default(cuid())
+  code    String   @unique
+  name    String
+  sortOrder Int    @default(0)
+  vendors Vendor[]
+  clients Client[]
+}
+
+model PaymentMethod {
+  id       String                @id @default(cuid())
+  slug     String                @unique
+  label    String
+  sortOrder Int                  @default(0)
+  vendors  VendorPaymentMethod[]
+}
+
+model PaymentTermAfterLiveOption {
+  id        String   @id @default(cuid())
+  label     String
+  sortOrder Int      @default(0)
+  vendors   Vendor[]
+}
+
+model Vendor {
+  id                String    @id @default(cuid())
+  userId            String
+  user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  companyName       String
+  siteUrl           String
+  siteUrlNormalized String
+  traffic           Int       @default(0)
+  dr                Int       @default(0)
+  mozDa             Int       @default(0)
+  authorityScore    Int       @default(0)
+  referringDomains  Int       @default(0)
+  backlinks         Int       @default(0)
+  trustFlow         Int       @default(0)
+  tatUnit           TatUnit
+  tatValue          Int
+  currencyId        String
+  currency          Currency  @relation(fields: [currencyId], references: [id])
+  guestPostCost     Decimal   @db.Decimal(18, 4)
+  nicheEditCost     Decimal   @db.Decimal(18, 4)
+  guestPostPrice    Decimal   @db.Decimal(18, 4)
+  nicheEditPrice    Decimal   @db.Decimal(18, 4)
+  paymentTerms      PaymentTerms
+  afterLiveOptionId String?
+  afterLiveOption   PaymentTermAfterLiveOption? @relation(fields: [afterLiveOptionId], references: [id])
+  contactEmail      String
+  contactPageUrl    String?
+  dealStatus        DealStatus
+  recordDate        DateTime?
+  notes             String?
+  languageId        String
+  language          Language  @relation(fields: [languageId], references: [id])
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  deletedAt         DateTime?
+
+  niches           VendorNiche[]
+  countries        VendorCountry[]
+  paymentMethods   VendorPaymentMethod[]
+  orders           Order[]
+
+  @@index([userId, siteUrlNormalized])
+  @@index([userId, dealStatus])
+  @@index([userId, deletedAt])
+}
+
+model VendorNiche {
+  vendorId String
+  nicheId  String
+  vendor   Vendor @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  niche    Niche  @relation(fields: [nicheId], references: [id], onDelete: Cascade)
+
+  @@id([vendorId, nicheId])
+}
+
+model VendorCountry {
+  vendorId  String
+  countryId String
+  vendor    Vendor  @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  country   Country @relation(fields: [countryId], references: [id], onDelete: Cascade)
+
+  @@id([vendorId, countryId])
+}
+
+model VendorPaymentMethod {
+  vendorId          String
+  paymentMethodId   String
+  vendor            Vendor          @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  paymentMethod     PaymentMethod   @relation(fields: [paymentMethodId], references: [id], onDelete: Cascade)
+
+  @@id([vendorId, paymentMethodId])
+}
+
+model Client {
+  id                String    @id @default(cuid())
+  userId            String
+  user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  companyName       String
+  clientName        String
+  siteUrl           String
+  siteUrlNormalized String
+  traffic           Int       @default(0)
+  dr                Int       @default(0)
+  mozDa             Int       @default(0)
+  authorityScore    Int       @default(0)
+  referringDomains  Int       @default(0)
+  backlinks         Int       @default(0)
+  email             String
+  whatsapp          String?
+  languageId        String
+  language          Language  @relation(fields: [languageId], references: [id])
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  deletedAt         DateTime?
+
+  niches    ClientNiche[]
+  countries ClientCountry[]
+  orders    Order[]
+
+  @@index([userId, siteUrlNormalized])
+  @@index([userId, deletedAt])
+}
+
+model ClientNiche {
+  clientId String
+  nicheId  String
+  client   Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  niche    Niche  @relation(fields: [nicheId], references: [id], onDelete: Cascade)
+
+  @@id([clientId, nicheId])
+}
+
+model ClientCountry {
+  clientId  String
+  countryId String
+  client    Client  @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  country   Country @relation(fields: [countryId], references: [id], onDelete: Cascade)
+
+  @@id([clientId, countryId])
+}
+
+model Order {
+  id                   String       @id @default(cuid())
+  userId               String
+  user                 User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  clientId             String
+  client               Client       @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  vendorId             String
+  vendor               Vendor       @relation(fields: [vendorId], references: [id], onDelete: Restrict)
+  linkType             LinkType
+  resellerPrice        Decimal      @db.Decimal(18, 4)
+  vendorCost           Decimal      @db.Decimal(18, 4)
+  articleWriting       Boolean      @default(false)
+  articleWritingFeeUsd Decimal?     @db.Decimal(18, 4)
+  totalPayment         Decimal      @db.Decimal(18, 4)
+  paymentTerms         PaymentTerms
+  deliveryDays         Int
+  status               OrderStatus
+  orderDate            DateTime
+  clientEmail          String
+  currencyId           String
+  currency             Currency     @relation(fields: [currencyId], references: [id])
+  paymentMethodNote    String?
+  createdAt            DateTime     @default(now())
+  updatedAt            DateTime     @updatedAt
+  deletedAt            DateTime?
+
+  @@index([userId, status, orderDate])
+  @@index([userId, deletedAt])
+  @@index([vendorId])
+  @@index([clientId])
+}
+
+model ExchangeRate {
+  id          String   @id @default(cuid())
+  currencyId  String
+  currency    Currency @relation(fields: [currencyId], references: [id], onDelete: Cascade)
+  date        DateTime @db.Date
+  usdPerUnit  Decimal  @db.Decimal(18, 8)
+
+  @@unique([currencyId, date])
+  @@index([date])
+}

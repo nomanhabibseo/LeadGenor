@@ -1,0 +1,30 @@
+{
+  "name": "leadgenor",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "predev": "npx kill-port 3000 3001 3002 4000",
+    "dev": "concurrently -n web,api -c cyan,magenta \"npm run dev:web\" \"npm run dev:api\"",
+    "dev:web": "npm run dev -w @leadgenor/web",
+    "dev:web:fresh": "npm run clean:web && npm run dev:web",
+    "dev:api": "npm run start:dev -w @leadgenor/api",
+    "build": "npm run build -ws --if-present",
+    "db:generate": "npm run generate -w @leadgenor/db",
+    "db:migrate": "npm run migrate:dev -w @leadgenor/db",
+    "db:seed": "npm run seed -w @leadgenor/db",
+    "db:studio": "npm run studio -w @leadgenor/db",
+    "clean:web": "node -e \"require('fs').rmSync('apps/web/.next',{recursive:true,force:true});\"",
+    "dev:fresh": "npm run clean:web && npm run dev",
+    "fix:web": "npm run clean:web && npm run build -w @leadgenor/web",
+    "start:web": "npm run start -w @leadgenor/web",
+    "lint": "npm run lint -ws --if-present"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "kill-port": "^2.0.1",
+    "typescript": "^5.7.2"
+  }
+}

@@ -1,0 +1,158 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #f8fafc;
+  --foreground: #0f172a;
+  --brand-ring: rgba(59, 130, 246, 0.45);
+  --surface-elevated: #ffffff;
+  --surface-border: rgba(15, 23, 42, 0.08);
+  --muted: #64748b;
+}
+
+body {
+  color: var(--foreground);
+  background: var(--background);
+  font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+}
+
+.dark body {
+  --background: #020617;
+  --foreground: #f1f5f9;
+  --surface-elevated: #0f172a;
+  --surface-border: rgba(148, 163, 184, 0.12);
+  --muted: #94a3b8;
+}
+
+.dark {
+  color-scheme: dark;
+}
+
+@layer components {
+  /** Primary save / CTA — blue in light mode, white surface in dark mode */
+  .btn-save-primary {
+    @apply rounded-lg bg-blue-600 px-6 py-2.5 text-sm font-semibold text-white shadow-md transition hover:bg-blue-700;
+  }
+  .btn-save-primary-sm {
+    @apply rounded-lg bg-blue-600 px-3 py-1.5 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700;
+  }
+  .btn-save-primary-block {
+    @apply w-full rounded-lg bg-blue-600 py-2.5 text-sm font-semibold text-white shadow-md transition hover:bg-blue-700;
+  }
+
+  .dark .btn-save-primary,
+  .dark .btn-save-primary-sm,
+  .dark .btn-save-primary-block {
+    @apply bg-white text-slate-900 shadow-lg hover:bg-slate-100;
+  }
+
+  .btn-toolbar-primary {
+    @apply inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700;
+  }
+  .dark .btn-toolbar-primary {
+    @apply bg-white text-slate-900 shadow-md hover:bg-slate-100;
+  }
+
+  /** Table toolbar — Filter button (solid blue) */
+  .btn-filter {
+    @apply inline-flex items-center gap-1.5 rounded-lg border border-blue-700 bg-blue-600 px-3 py-1.5 text-sm font-medium text-white shadow-sm transition hover:bg-blue-700;
+  }
+  .btn-filter-active {
+    @apply border-blue-800 bg-blue-800 ring-2 ring-blue-200;
+  }
+  .dark .btn-filter {
+    @apply border-blue-500 bg-blue-600 hover:bg-blue-500;
+  }
+  .dark .btn-filter-active {
+    @apply border-cyan-500 bg-blue-700 ring-2 ring-cyan-400/50;
+  }
+
+  .form-input {
+    @apply mt-1.5 w-full rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-slate-900 shadow-sm transition placeholder:text-slate-400 focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/20;
+  }
+  .dark .form-input {
+    @apply border-slate-600 bg-slate-900/80 text-slate-100 placeholder:text-slate-300 focus:border-cyan-500/60 focus:ring-cyan-500/20;
+  }
+  .form-label {
+    @apply text-sm font-medium text-slate-700;
+  }
+  .dark .form-label {
+    @apply text-slate-100;
+  }
+  .form-section-title {
+    @apply text-base font-semibold tracking-tight text-slate-900;
+  }
+  .dark .form-section-title {
+    @apply text-white;
+  }
+  .form-section-desc {
+    @apply mt-1 text-sm text-slate-500;
+  }
+  .dark .form-section-desc {
+    @apply text-slate-100;
+  }
+  .panel {
+    @apply rounded-2xl border border-slate-200/80 bg-white p-6 shadow-card;
+  }
+  .dark .panel {
+    @apply border-slate-700/80 bg-slate-900/90 shadow-none ring-1 ring-slate-700/50;
+  }
+  .form-input-sm {
+    @apply mt-1 w-full rounded-lg border border-slate-200/90 bg-slate-50/40 px-3 py-2 text-sm text-slate-900 shadow-sm transition placeholder:text-slate-400 focus:border-brand-500 focus:bg-white focus:outline-none focus:ring-2 focus:ring-brand-500/20;
+  }
+  .dark .form-input-sm {
+    @apply border-slate-600 bg-slate-900/60 text-slate-100 placeholder:text-slate-300 focus:border-cyan-500/50 focus:bg-slate-900 focus:ring-cyan-500/20;
+  }
+  .form-label-sm {
+    @apply text-xs font-medium text-slate-600;
+  }
+  .dark .form-label-sm {
+    @apply text-slate-100;
+  }
+  .form-trigger-sm {
+    @apply mt-1 flex h-10 w-full items-center justify-between gap-2 rounded-lg border border-slate-200/90 bg-slate-50/40 px-3 text-left text-sm text-slate-900 shadow-sm transition hover:border-slate-300 hover:bg-white focus:border-brand-500 focus:bg-white focus:outline-none focus:ring-2 focus:ring-brand-500/20;
+  }
+  .dark .form-trigger-sm {
+    @apply border-slate-600 bg-slate-900/60 text-slate-100 hover:border-slate-500 hover:bg-slate-800 focus:border-cyan-500/50 focus:bg-slate-900 focus:ring-cyan-500/20;
+  }
+  .form-field-error {
+    @apply mt-0.5 text-xs text-red-600;
+  }
+  .dark .form-field-error {
+    @apply text-red-400;
+  }
+  .form-input-sm-invalid,
+  .form-input-body-invalid {
+    @apply border-red-400 ring-1 ring-red-200;
+  }
+  .dark .form-input-sm-invalid,
+  .dark .form-input-body-invalid {
+    @apply border-red-500 ring-red-500/30;
+  }
+  /** White fields on dashboard grey body (tray-style) */
+  .form-input-body {
+    @apply mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm transition placeholder:text-slate-400 focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/20;
+  }
+  .dark .form-input-body {
+    @apply border-slate-600 bg-slate-900/70 text-slate-100 placeholder:text-slate-300 focus:border-cyan-500/50 focus:ring-cyan-500/20;
+  }
+  .form-trigger-body {
+    @apply mt-1 flex h-10 w-full items-center justify-between gap-2 rounded-lg border border-slate-200 bg-white px-3 text-left text-sm text-slate-900 shadow-sm transition hover:border-slate-300 focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/20;
+  }
+  .dark .form-trigger-body {
+    @apply border-slate-600 bg-slate-900/70 text-slate-100 hover:border-slate-500 focus:border-cyan-500/50 focus:ring-cyan-500/20;
+  }
+  .form-section-card {
+    @apply rounded-xl border border-slate-200/90 bg-gradient-to-br from-slate-50/90 to-white p-4 shadow-sm ring-1 ring-slate-100/80;
+  }
+  .dark .form-section-card {
+    @apply border-slate-700/80 bg-gradient-to-br from-slate-900/80 to-slate-950/90 ring-slate-700/50;
+  }
+  .form-section-card-title {
+    @apply mb-3 text-xs font-semibold uppercase tracking-wide text-slate-500;
+  }
+  .dark .form-section-card-title {
+    @apply text-slate-100;
+  }
+}
