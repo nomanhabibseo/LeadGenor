@@ -25,7 +25,7 @@ export function StatCard({
       href={href}
       className={cn(
         "group relative block overflow-hidden rounded-2xl border border-slate-200/90 bg-white p-6 shadow-card transition-all",
-        "dark:border-slate-700/80 dark:bg-slate-900/90 dark:shadow-none dark:ring-1 dark:ring-slate-700/50",
+        "dark:border-slate-700/80 dark:bg-slate-800/90 dark:shadow-none dark:ring-1 dark:ring-slate-700/50",
         "hover:-translate-y-1 hover:border-brand-300/60 hover:shadow-brand dark:hover:border-cyan-500/30",
       )}
     >
@@ -48,8 +48,8 @@ export function StatCard({
         <div
           className={cn(
             "flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-slate-100 to-slate-50 text-slate-600 shadow-inner",
-            "dark:from-slate-800 dark:to-slate-900 dark:text-slate-300",
-            "group-hover:from-brand-50 group-hover:to-violet-50 group-hover:text-brand-700 dark:group-hover:from-slate-800 dark:group-hover:to-slate-800 dark:group-hover:text-cyan-300",
+            "dark:from-slate-700 dark:to-slate-800 dark:text-slate-300",
+            "group-hover:from-brand-50 group-hover:to-violet-50 group-hover:text-brand-700 dark:group-hover:from-slate-700 dark:group-hover:to-slate-800 dark:group-hover:text-cyan-300",
             accentClassName,
           )}
         >

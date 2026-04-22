@@ -34,11 +34,10 @@ function fmtUsd(n: number) {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(n);
 }
 
-function SectionTitle({ title, subtitle }: { title: string; subtitle?: string }) {
+function SectionTitle({ title }: { title: string }) {
   return (
     <div className="mb-5 mt-12 border-b border-slate-200/80 pb-2 first:mt-0 dark:border-slate-700/80">
       <h2 className="text-lg font-bold tracking-tight text-slate-900 dark:text-slate-100">{title}</h2>
-      {subtitle ? <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">{subtitle}</p> : null}
     </div>
   );
 }
@@ -47,19 +46,11 @@ export default function DashboardPage() {
   const { data: session } = useSession();
   const token = session?.accessToken;
 
-  const { data: me } = useQuery({
-    queryKey: ["users", "me", token],
-    queryFn: () => apiFetch<{ name: string | null }>("/users/me", token),
-    enabled: !!token,
-  });
-
   const { data, isLoading } = useQuery({
     queryKey: ["stats", "dashboard"],
     queryFn: () => apiFetch<DashboardStats>("/stats/dashboard", token),
     enabled: !!token,
   });
-
-  const welcomeName = (me?.name ?? session?.user?.name ?? "").trim() || "there";
 
   if (isLoading || !data) {
     return (
@@ -77,12 +68,8 @@ export default function DashboardPage() {
   return (
     <div>
       <h1 className="text-3xl font-bold tracking-tight text-slate-900 dark:text-slate-100">Dashboard</h1>
-      <p className="mt-2 max-w-2xl text-slate-600 dark:text-slate-400">
-        Welcome back {welcomeName}. Revenue &amp; profit cards use USD; vendor prices use each vendor&apos;s currency
-        elsewhere.
-      </p>
 
-      <SectionTitle title="Revenue & profit" subtitle="Sales and margin performance" />
+      <SectionTitle title="Revenue & profit" />
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard
           label="Total Sale"
@@ -114,7 +101,7 @@ export default function DashboardPage() {
         />
       </div>
 
-      <SectionTitle title="Vendors" subtitle="Guest post vendor pipeline" />
+      <SectionTitle title="Vendors" />
       <div className="-mx-1 grid gap-4 px-1 sm:grid-cols-2 xl:grid-cols-3 md:-mx-2 md:px-2">
         <StatCard
           label="Total Vendors"
@@ -141,7 +128,7 @@ export default function DashboardPage() {
         />
       </div>
 
-      <SectionTitle title="Clients & orders" subtitle="Relationship and fulfillment volume" />
+      <SectionTitle title="Clients & orders" />
       <div className="-mx-1 grid gap-4 px-1 sm:grid-cols-2 xl:grid-cols-3 md:-mx-2 md:px-2">
         <StatCard
           label="Total Clients"

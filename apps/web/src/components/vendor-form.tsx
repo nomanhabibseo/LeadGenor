@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { useSession } from "next-auth/react";
-import { ChevronDown, FileUp } from "lucide-react";
+import { ChevronDown, FileUp, Loader2 } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useReference } from "@/hooks/use-reference";
 import { apiFetch, apiUrl } from "@/lib/api";
@@ -14,27 +14,34 @@ import { normalizeSiteUrlInput } from "@/lib/site-url";
 import { cn } from "@/lib/utils";
 import { PickerModal } from "@/components/picker-modal";
 import { ImportSpreadsheetModal } from "@/components/import-spreadsheet-modal";
+import { FormSectionCard } from "@/components/form-section-card";
+import { EmailTagsInput } from "@/components/email-tags-input";
+import { RefIdChipsField } from "@/components/ref-id-chips-field";
+import { StepperField } from "@/components/stepper-field";
+import { VENDOR_COUNTRY_MAX, VENDOR_NICHE_MAX } from "@/lib/vendor-client-form-limits";
 
 const empty = {
   companyName: "",
   siteUrl: "",
   nicheIds: [] as string[],
-  traffic: 0,
+  traffic: null as number | null,
   countryIds: [] as string[],
   languageId: "",
-  dr: 0,
-  mozDa: 0,
-  authorityScore: 0,
-  referringDomains: 0,
-  backlinks: 0,
-  trustFlow: 0,
+  dr: null as number | null,
+  mozDa: null as number | null,
+  authorityScore: null as number | null,
+  referringDomains: null as number | null,
+  backlinks: null as number | null,
+  trustFlow: null as number | null,
+  seoLinkAttribute: "DO_FOLLOW" as "DO_FOLLOW" | "NO_FOLLOW" | "SPONSORED",
+  seoLinkQuantity: 1,
   tatUnit: "DAYS" as "HOURS" | "DAYS",
   tatValue: 1,
   currencyId: "",
-  guestPostCost: 0,
-  nicheEditCost: 0,
-  guestPostPrice: 0,
-  nicheEditPrice: 0,
+  guestPostCost: null as number | null,
+  nicheEditCost: null as number | null,
+  guestPostPrice: null as number | null,
+  nicheEditPrice: null as number | null,
   paymentTerms: "ADVANCE" as "ADVANCE" | "AFTER_LIVE_LINK",
   afterLiveOptionId: "" as string | undefined,
   paymentMethodIds: [] as string[],
@@ -78,6 +85,7 @@ export function VendorForm({ vendorId }: { vendorId?: string }) {
   const [qLang, setQLang] = useState("");
   const [qPay, setQPay] = useState("");
   const [importMsg, setImportMsg] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
   function clearFieldError(key: string) {
@@ -108,6 +116,8 @@ export function VendorForm({ vendorId }: { vendorId?: string }) {
       referringDomains: Number(v.referringDomains),
       backlinks: Number(v.backlinks),
       trustFlow: Number(v.trustFlow),
+      seoLinkAttribute: (v.seoLinkAttribute as typeof empty.seoLinkAttribute) || "DO_FOLLOW",
+      seoLinkQuantity: Math.max(1, Number(v.seoLinkQuantity ?? 1)),
       tatUnit: v.tatUnit as "HOURS" | "DAYS",
       tatValue: Number(v.tatValue),
       currencyId: String(v.currencyId),
@@ -165,19 +175,42 @@ export function VendorForm({ vendorId }: { vendorId?: string }) {
     return ref.paymentMethods.filter((p) => p.label.toLowerCase().includes(q) || p.slug.toLowerCase().includes(q));
   }, [ref?.paymentMethods, qPay]);
 
+  const activeCurrency = useMemo(() => {
+    if (!form.currencyId || !ref?.currencies) return null;
+    return ref.currencies.find((c) => c.id === form.currencyId) ?? null;
+  }, [form.currencyId, ref?.currencies]);
+
+  function marginLine(cost: number, price: number) {
+    if (cost <= 0 || price <= 0 || price <= cost) return null;
+    const m = price - cost;
+    const pct = Math.round((m / price) * 100);
+    const sym = activeCurrency?.symbol ?? "$";
+    return (
+      <p className="mt-1.5 text-[11px] font-medium text-violet-700 dark:text-violet-300">
+        <span className="inline-block rounded-full bg-violet-50 px-2 py-0.5 dark:bg-violet-950/50">
+          Margin: {sym}
+          {m.toFixed(0)} = {pct}% profit
+        </span>
+      </p>
+    );
+  }
+
   const selectedLanguageName = useMemo(() => {
     if (!form.languageId || !ref?.languages) return "";
     return ref.languages.find((l) => l.id === form.languageId)?.name ?? "";
   }, [form.languageId, ref?.languages]);
 
-  const body = () => ({
-    ...form,
-    siteUrl: normalizeSiteUrlInput(form.siteUrl),
-    afterLiveOptionId: form.paymentTerms === "AFTER_LIVE_LINK" ? form.afterLiveOptionId || undefined : undefined,
-    recordDate: form.recordDate || undefined,
-    contactPageUrl: form.contactPageUrl?.trim() || undefined,
-    notes: form.notes || undefined,
-  });
+  const body = () =>
+    Object.fromEntries(
+      Object.entries({
+        ...form,
+        siteUrl: normalizeSiteUrlInput(form.siteUrl),
+        afterLiveOptionId: form.paymentTerms === "AFTER_LIVE_LINK" ? form.afterLiveOptionId || undefined : undefined,
+        recordDate: form.recordDate || undefined,
+        contactPageUrl: form.contactPageUrl?.trim() || undefined,
+        notes: form.notes || undefined,
+      }).filter(([, v]) => v !== null),
+    );
 
   function validateFields(): boolean {
     const e: Record<string, string> = {};
@@ -201,15 +234,21 @@ export function VendorForm({ vendorId }: { vendorId?: string }) {
       return;
     }
     if (!validateFields()) return;
+    setSaving(true);
     const url = force && !vendorId ? apiUrl("/vendors/force") : apiUrl(vendorId ? `/vendors/${vendorId}` : "/vendors");
-    const res = await fetch(url, {
-      method: vendorId ? "PUT" : "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify(body()),
-    });
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: vendorId ? "PUT" : "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(body()),
+      });
+    } finally {
+      setSaving(false);
+    }
     if (res.status === 400) {
       const j = (await res.json().catch(() => ({}))) as Record<string, unknown>;
       if (isDuplicateUrlResponse(j)) {
@@ -356,7 +395,7 @@ export function VendorForm({ vendorId }: { vendorId?: string }) {
           aria-modal="true"
           aria-labelledby="dup-vendor-title"
         >
-          <div className="max-w-md rounded-xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-600 dark:bg-slate-900">
+          <div className="max-w-md rounded-xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-600 dark:bg-slate-800">
             <h2 id="dup-vendor-title" className="text-base font-semibold text-slate-900 dark:text-slate-100">
               Duplicate site
             </h2>
@@ -427,7 +466,7 @@ export function VendorForm({ vendorId }: { vendorId?: string }) {
                   clearFieldError("nicheIds");
                   const set = new Set(form.nicheIds);
                   if (set.has(n.id)) set.delete(n.id);
-                  else if (set.size < 5) set.add(n.id);
+                  else if (set.size < VENDOR_NICHE_MAX) set.add(n.id);
                   setForm({ ...form, nicheIds: [...set] });
                 }}
               />
@@ -465,7 +504,7 @@ export function VendorForm({ vendorId }: { vendorId?: string }) {
                   clearFieldError("countryIds");
                   const set = new Set(form.countryIds);
                   if (set.has(c.id)) set.delete(c.id);
-                  else if (set.size < 3) set.add(c.id);
+                  else if (set.size < VENDOR_COUNTRY_MAX) set.add(c.id);
                   setForm({ ...form, countryIds: [...set] });
                 }}
               />
@@ -557,7 +596,7 @@ export function VendorForm({ vendorId }: { vendorId?: string }) {
                 setImportMsg(null);
                 setImportOpen(true);
               }}
-              className="inline-flex h-9 shrink-0 items-center justify-center gap-2 self-start rounded-lg border border-slate-200 bg-white px-4 text-sm font-medium text-slate-800 shadow-sm transition hover:bg-slate-50"
+              className="btn-toolbar-outline shrink-0 self-start"
             >
               <FileUp className="h-4 w-4 text-brand-600" />
               Import
@@ -567,328 +606,437 @@ export function VendorForm({ vendorId }: { vendorId?: string }) {
         </div>
       )}
 
-      <div className="space-y-5">
+      <div className="space-y-6">
         {saveError && (
           <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800">{saveError}</div>
         )}
 
-        <div className="grid gap-3 sm:grid-cols-2">
-          <label className="block">
-            <span className="form-label-sm">Company name</span>
-            <input
-              className={cn("form-input-body", fieldErrors.companyName && "form-input-body-invalid")}
-              value={form.companyName}
-              onChange={(e) => {
-                clearFieldError("companyName");
-                setForm({ ...form, companyName: e.target.value });
-              }}
-            />
-            {fieldErrors.companyName ? <p className="form-field-error">{fieldErrors.companyName}</p> : null}
-          </label>
-          <label className="block">
-            <span className="form-label-sm">Site URL</span>
-            <input
-              className={cn("form-input-body", fieldErrors.siteUrl && "form-input-body-invalid")}
-              placeholder="https://example.com"
-              value={form.siteUrl}
-              onChange={(e) => {
-                clearFieldError("siteUrl");
-                setForm({ ...form, siteUrl: e.target.value });
-              }}
-              onBlur={(e) => setForm({ ...form, siteUrl: normalizeSiteUrlInput(e.target.value) })}
-            />
-            {fieldErrors.siteUrl ? <p className="form-field-error">{fieldErrors.siteUrl}</p> : null}
-          </label>
-        </div>
+        <FormSectionCard title="Basic information">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="block">
+              <span className="form-label-sm">Company name</span>
+              <input
+                className={cn("form-input-body", fieldErrors.companyName && "form-input-body-invalid")}
+                placeholder="e.g. TechBlog Media"
+                value={form.companyName}
+                onChange={(e) => {
+                  clearFieldError("companyName");
+                  setForm({ ...form, companyName: e.target.value });
+                }}
+              />
+              {fieldErrors.companyName ? <p className="form-field-error">{fieldErrors.companyName}</p> : null}
+            </label>
+            <label className="block">
+              <span className="form-label-sm">
+                Site URL <span className="text-red-500">*</span>
+              </span>
+              <input
+                className={cn("form-input-body", fieldErrors.siteUrl && "form-input-body-invalid")}
+                placeholder="https://example.com"
+                value={form.siteUrl}
+                onChange={(e) => {
+                  clearFieldError("siteUrl");
+                  setForm({ ...form, siteUrl: e.target.value });
+                }}
+                onBlur={(e) => setForm({ ...form, siteUrl: normalizeSiteUrlInput(e.target.value) })}
+              />
+              {fieldErrors.siteUrl ? <p className="form-field-error">{fieldErrors.siteUrl}</p> : null}
+            </label>
+          </div>
 
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-          <div>
-            <span className="form-label-sm">Niche</span>
-            <button
-              type="button"
-              onClick={() => {
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <RefIdChipsField
+              label="Niche"
+              required
+              ids={form.nicheIds}
+              max={VENDOR_NICHE_MAX}
+              options={(ref.niches ?? []).map((n) => ({ id: n.id, label: n.label }))}
+              onChange={(nicheIds) => {
+                clearFieldError("nicheIds");
+                setForm({ ...form, nicheIds });
+              }}
+              onOpenPicker={() => {
                 clearFieldError("nicheIds");
                 setNicheOpen(true);
               }}
-              className={cn("form-trigger-body", fieldErrors.nicheIds && "form-input-body-invalid")}
-            >
-              <span className={cn("truncate", form.nicheIds.length ? "text-slate-900 dark:text-slate-100" : "text-slate-400 dark:text-slate-300")}>
-                {form.nicheIds.length ? `${form.nicheIds.length} selected` : "Choose…"}
-              </span>
-              <ChevronDown className="h-4 w-4 shrink-0 text-slate-400 dark:text-slate-300" />
-            </button>
-            {fieldErrors.nicheIds ? <p className="form-field-error">{fieldErrors.nicheIds}</p> : null}
-          </div>
-          <label className="block">
-            <span className="form-label-sm">Traffic</span>
-            <input
-              type="number"
-              min={0}
-              className="form-input-body"
-              value={form.traffic}
-              onChange={(e) => setForm({ ...form, traffic: Number(e.target.value) || 0 })}
+              error={fieldErrors.nicheIds}
             />
-          </label>
-          <div>
-            <span className="form-label-sm">Country</span>
-            <button
-              type="button"
-              onClick={() => {
+            <RefIdChipsField
+              label="Country"
+              required
+              ids={form.countryIds}
+              max={VENDOR_COUNTRY_MAX}
+              options={(ref.countries ?? []).map((c) => ({ id: c.id, label: `${c.code} — ${c.name}` }))}
+              onChange={(countryIds) => {
+                clearFieldError("countryIds");
+                setForm({ ...form, countryIds });
+              }}
+              onOpenPicker={() => {
                 clearFieldError("countryIds");
                 setCountryOpen(true);
               }}
-              className={cn("form-trigger-body", fieldErrors.countryIds && "form-input-body-invalid")}
-            >
-              <span className={cn("truncate", form.countryIds.length ? "text-slate-900 dark:text-slate-100" : "text-slate-400 dark:text-slate-300")}>
-                {form.countryIds.length ? `${form.countryIds.length} selected` : "Choose…"}
-              </span>
-              <ChevronDown className="h-4 w-4 shrink-0 text-slate-400 dark:text-slate-300" />
-            </button>
-            {fieldErrors.countryIds ? <p className="form-field-error">{fieldErrors.countryIds}</p> : null}
-          </div>
-          <div>
-            <span className="form-label-sm">Language</span>
-            <button
-              type="button"
-              onClick={() => {
-                clearFieldError("languageId");
-                setLanguageOpen(true);
-              }}
-              className={cn("form-trigger-body", fieldErrors.languageId && "form-input-body-invalid")}
-            >
-              <span className={cn("truncate", selectedLanguageName ? "text-slate-900 dark:text-slate-100" : "text-slate-400 dark:text-slate-300")}>
-                {selectedLanguageName || "Choose…"}
-              </span>
-              <ChevronDown className="h-4 w-4 shrink-0 text-slate-400 dark:text-slate-300" />
-            </button>
-            {fieldErrors.languageId ? <p className="form-field-error">{fieldErrors.languageId}</p> : null}
-          </div>
-        </div>
-
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {(
-            [
-              ["dr", "DR"],
-              ["mozDa", "Moz DA"],
-              ["authorityScore", "Authority score"],
-              ["referringDomains", "Ref. domains"],
-              ["backlinks", "Backlinks"],
-              ["trustFlow", "Trust flow"],
-            ] as const
-          ).map(([k, label]) => (
-            <label key={k} className="block">
-              <span className="form-label-sm">{label}</span>
-              <input
-                type="number"
-                min={0}
-                max={k === "dr" || k === "mozDa" || k === "authorityScore" ? 100 : undefined}
-                className="form-input-body"
-                value={form[k]}
-                onChange={(e) => setForm({ ...form, [k]: Number(e.target.value) || 0 })}
-              />
+              error={fieldErrors.countryIds}
+            />
+            <label className="block">
+              <span className="form-label-sm">Traffic / mo</span>
+              <div className="mt-1">
+                <StepperField
+                  mode="int"
+                  min={0}
+                  placeholder="e.g. 5000"
+                  aria-label="Traffic per month"
+                  value={form.traffic}
+                  onChange={(v) => setForm({ ...form, traffic: v })}
+                />
+              </div>
             </label>
-          ))}
-        </div>
-
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          <div>
-            <span className="form-label-sm">TAT (turnaround)</span>
-            <div className="mt-1 flex w-full max-w-full overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm dark:border-slate-600 dark:bg-slate-900/70">
-              <select
-                className="border-0 bg-slate-50 px-2 py-2 text-xs font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-brand-500/30 dark:bg-slate-800/90 dark:text-slate-100"
-                value={form.tatUnit}
-                onChange={(e) => setForm({ ...form, tatUnit: e.target.value as "HOURS" | "DAYS" })}
+            <div>
+              <span className="form-label-sm">
+                Language <span className="text-red-500">*</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  clearFieldError("languageId");
+                  setLanguageOpen(true);
+                }}
+                className={cn("form-trigger-body", fieldErrors.languageId && "form-input-body-invalid")}
               >
-                <option value="HOURS">Hours</option>
-                <option value="DAYS">Days</option>
-              </select>
-              <input
-                type="number"
-                min={0}
-                className="min-w-0 flex-1 border-0 bg-white px-2 py-2 text-sm font-semibold tabular-nums text-slate-900 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-brand-500/30 dark:bg-transparent dark:text-slate-100"
-                value={form.tatValue}
-                onChange={(e) => setForm({ ...form, tatValue: Number(e.target.value) || 0 })}
-              />
+                <span className={cn("truncate", selectedLanguageName ? "text-slate-900 dark:text-slate-100" : "text-slate-400 dark:text-slate-300")}>
+                  {selectedLanguageName || "Choose…"}
+                </span>
+                <ChevronDown className="h-4 w-4 shrink-0 text-slate-400 dark:text-slate-300" />
+              </button>
+              {fieldErrors.languageId ? <p className="form-field-error">{fieldErrors.languageId}</p> : null}
             </div>
           </div>
-          <label className="block sm:col-span-1">
-            <span className="form-label-sm">Currency</span>
-            <select
-              className="form-input-body"
-              value={form.currencyId}
-              onChange={(e) => setForm({ ...form, currencyId: e.target.value })}
-            >
-              {ref.currencies.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.code} ({c.symbol})
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
+        </FormSectionCard>
 
-        <div className="grid gap-3 sm:grid-cols-2">
-            <label className="block">
-              <span className="form-label-sm">Guest post cost</span>
-              <input
-                type="number"
-                min={0}
-                step="0.01"
-                className="form-input-body"
-                value={form.guestPostCost}
-                onChange={(e) => setForm({ ...form, guestPostCost: Number(e.target.value) || 0 })}
-              />
-            </label>
-            <label className="block">
-              <span className="form-label-sm">Niche edit cost</span>
-              <input
-                type="number"
-                min={0}
-                step="0.01"
-                className="form-input-body"
-                value={form.nicheEditCost}
-                onChange={(e) => setForm({ ...form, nicheEditCost: Number(e.target.value) || 0 })}
-              />
-            </label>
-        </div>
+        <FormSectionCard title="SEO metrics">
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            {(
+              [
+                ["dr", "DR (Ahrefs)"],
+                ["mozDa", "Moz DA"],
+                ["authorityScore", "Authority score"],
+                ["trustFlow", "Trust flow"],
+              ] as const
+            ).map(([k, label]) => (
+              <label key={k} className="block">
+                <span className="form-label-sm">{label}</span>
+                <div className="mt-1">
+                  <StepperField
+                    mode="int"
+                    min={0}
+                    max={100}
+                    aria-label={label}
+                    value={form[k]}
+                    onChange={(v) => setForm({ ...form, [k]: v })}
+                  />
+                </div>
+              </label>
+            ))}
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            {(
+              [
+                ["referringDomains", "Ref. domains"],
+                ["backlinks", "Backlinks"],
+              ] as const
+            ).map(([k, label]) => (
+              <label key={k} className="block">
+                <span className="form-label-sm">{label}</span>
+                <div className="mt-1">
+                  <StepperField
+                    mode="int"
+                    min={0}
+                    placeholder={k === "referringDomains" ? "e.g. 1200" : "e.g. 4500"}
+                    aria-label={label}
+                    value={form[k]}
+                    onChange={(v) => setForm({ ...form, [k]: v })}
+                  />
+                </div>
+              </label>
+            ))}
+          </div>
+        </FormSectionCard>
 
-        <div className="grid gap-3 sm:grid-cols-2">
+        <FormSectionCard title="Pricing & deal terms">
+          <div className="grid gap-3 sm:grid-cols-2">
             <label className="block">
-              <span className="form-label-sm">Guest Post Reselling Price</span>
-              <input
-                type="number"
-                min={0}
-                step="0.01"
-                className="form-input-body"
-                value={form.guestPostPrice}
-                onChange={(e) => setForm({ ...form, guestPostPrice: Number(e.target.value) || 0 })}
-              />
+              <span className="form-label-sm">Guest post cost (what you pay)</span>
+              <div className="mt-1">
+                <StepperField
+                  mode="decimal"
+                  min={0}
+                  prefix={activeCurrency?.symbol ?? "$"}
+                  placeholder="e.g. 100"
+                  aria-label="Guest post cost"
+                  value={form.guestPostCost}
+                  onChange={(v) => setForm({ ...form, guestPostCost: v })}
+                />
+              </div>
             </label>
             <label className="block">
-              <span className="form-label-sm">Niche Edit Reselling Price</span>
-              <input
-                type="number"
-                min={0}
-                step="0.01"
-                className="form-input-body"
-                value={form.nicheEditPrice}
-                onChange={(e) => setForm({ ...form, nicheEditPrice: Number(e.target.value) || 0 })}
-              />
+              <span className="form-label-sm">Niche edit cost (what you pay)</span>
+              <div className="mt-1">
+                <StepperField
+                  mode="decimal"
+                  min={0}
+                  prefix={activeCurrency?.symbol ?? "$"}
+                  placeholder="e.g. 60"
+                  aria-label="Niche edit cost"
+                  value={form.nicheEditCost}
+                  onChange={(v) => setForm({ ...form, nicheEditCost: v })}
+                />
+              </div>
             </label>
-        </div>
+          </div>
 
-        <div className="flex flex-col gap-3 lg:flex-row lg:flex-wrap lg:items-end">
-          <label className="block min-w-[200px] flex-1">
-            <span className="form-label-sm">Payment terms</span>
-            <select
-              className="form-input-body"
-              value={form.paymentTerms}
-              onChange={(e) => setForm({ ...form, paymentTerms: e.target.value as "ADVANCE" | "AFTER_LIVE_LINK" })}
-            >
-              <option value="ADVANCE">Advance</option>
-              <option value="AFTER_LIVE_LINK">After live link</option>
-            </select>
-          </label>
-          {form.paymentTerms === "AFTER_LIVE_LINK" ? (
-            <label className="block min-w-[200px] flex-1">
-              <span className="form-label-sm">After live — timing</span>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div>
+              <label className="block">
+                <span className="form-label-sm">Guest post reselling price (what client pays)</span>
+                <div className="mt-1">
+                  <StepperField
+                    mode="decimal"
+                    min={0}
+                    prefix={activeCurrency?.symbol ?? "$"}
+                    placeholder="e.g. 150"
+                    aria-label="Guest post price"
+                    value={form.guestPostPrice}
+                    onChange={(v) => setForm({ ...form, guestPostPrice: v })}
+                  />
+                </div>
+              </label>
+              {marginLine(Number(form.guestPostCost ?? 0), Number(form.guestPostPrice ?? 0))}
+            </div>
+            <div>
+              <label className="block">
+                <span className="form-label-sm">Niche edit reselling price (what client pays)</span>
+                <div className="mt-1">
+                  <StepperField
+                    mode="decimal"
+                    min={0}
+                    prefix={activeCurrency?.symbol ?? "$"}
+                    placeholder="e.g. 90"
+                    aria-label="Niche edit price"
+                    value={form.nicheEditPrice}
+                    onChange={(v) => setForm({ ...form, nicheEditPrice: v })}
+                  />
+                </div>
+              </label>
+              {marginLine(Number(form.nicheEditCost ?? 0), Number(form.nicheEditPrice ?? 0))}
+            </div>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-1 md:grid-cols-3 md:items-end">
+            <div>
+              <span className="form-label-sm">Link type</span>
+              <div className="mt-1 flex w-full max-w-full overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm ring-1 ring-slate-200/40 transition-colors hover:border-sky-500 focus-within:border-sky-500 focus-within:ring-2 focus-within:ring-sky-500/20 dark:border-slate-600 dark:bg-slate-800/75 dark:ring-slate-700/50 dark:hover:border-sky-400 dark:focus-within:border-sky-400 dark:focus-within:ring-sky-500/25">
+                <StepperField
+                  embedded
+                  mode="int"
+                  min={0}
+                  aria-label="Link quantity"
+                  className="w-24 shrink-0 sm:w-28"
+                  value={form.seoLinkQuantity}
+                  onChange={(v) =>
+                    setForm({
+                      ...form,
+                      seoLinkQuantity: v == null ? 1 : Math.max(1, v),
+                    })
+                  }
+                  onBlur={() =>
+                    setForm((f) => ({
+                      ...f,
+                      seoLinkQuantity: f.seoLinkQuantity < 1 ? 1 : f.seoLinkQuantity,
+                    }))
+                  }
+                />
+                <select
+                  aria-label="Link attribute"
+                  className="min-w-0 flex-1 border-0 bg-white px-2 py-2 text-sm font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-sky-500/30 dark:bg-transparent dark:text-slate-100"
+                  value={form.seoLinkAttribute}
+                  onChange={(e) =>
+                    setForm({
+                      ...form,
+                      seoLinkAttribute: e.target.value as typeof form.seoLinkAttribute,
+                    })
+                  }
+                >
+                  <option value="DO_FOLLOW">Do-follow</option>
+                  <option value="NO_FOLLOW">No-follow</option>
+                  <option value="SPONSORED">Sponsored</option>
+                </select>
+              </div>
+            </div>
+            <div>
+              <span className="form-label-sm">TAT (turnaround)</span>
+              <div className="mt-1 flex w-full max-w-full overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm ring-1 ring-slate-200/40 transition-colors hover:border-sky-500 focus-within:border-sky-500 focus-within:ring-2 focus-within:ring-sky-500/20 dark:border-slate-600 dark:bg-slate-800/75 dark:ring-slate-700/50 dark:hover:border-sky-400 dark:focus-within:border-sky-400 dark:focus-within:ring-sky-500/25">
+                <StepperField
+                  embedded
+                  mode="int"
+                  min={0}
+                  aria-label="Turnaround amount"
+                  className="min-w-0 flex-1"
+                  value={form.tatValue}
+                  onChange={(v) =>
+                    setForm({
+                      ...form,
+                      tatValue: v == null ? 1 : Math.max(1, v),
+                    })
+                  }
+                  onBlur={() =>
+                    setForm((f) => ({ ...f, tatValue: f.tatValue < 1 ? 1 : f.tatValue }))
+                  }
+                />
+                <select
+                  aria-label="Turnaround unit"
+                  className="w-[5.5rem] shrink-0 border-0 border-l border-slate-200 bg-slate-50 px-2 py-2 text-xs font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-sky-500/30 dark:border-slate-600 dark:bg-slate-800/90 dark:text-slate-100"
+                  value={form.tatUnit}
+                  onChange={(e) => setForm({ ...form, tatUnit: e.target.value as "HOURS" | "DAYS" })}
+                >
+                  <option value="HOURS">Hours</option>
+                  <option value="DAYS">Days</option>
+                </select>
+              </div>
+            </div>
+            <label className="block">
+              <span className="form-label-sm">Currency</span>
               <select
                 className="form-input-body"
-                value={form.afterLiveOptionId}
-                onChange={(e) => setForm({ ...form, afterLiveOptionId: e.target.value })}
+                value={form.currencyId}
+                onChange={(e) => setForm({ ...form, currencyId: e.target.value })}
               >
-                <option value="">Choose…</option>
-                {ref.afterLiveOptions.map((o) => (
-                  <option key={o.id} value={o.id}>
-                    {o.label}
+                {ref.currencies.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.code} ({c.symbol})
                   </option>
                 ))}
               </select>
             </label>
-          ) : null}
-          <div className="min-w-[200px] flex-1">
-            <span className="form-label-sm">Payment methods</span>
-            <button type="button" onClick={() => setPayOpen(true)} className="form-trigger-body">
-              <span className={cn("truncate", form.paymentMethodIds.length ? "text-slate-900 dark:text-slate-100" : "text-slate-400 dark:text-slate-300")}>
-                {form.paymentMethodIds.length ? `${form.paymentMethodIds.length} selected` : "Choose…"}
-              </span>
-              <ChevronDown className="h-4 w-4 shrink-0 text-slate-400 dark:text-slate-300" />
-            </button>
           </div>
-        </div>
+        </FormSectionCard>
 
-        <div className="grid gap-3 sm:grid-cols-2">
+        <FormSectionCard title="Contact & deal status">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="block">
+              <span className="form-label-sm">
+                Email <span className="text-red-500">*</span>
+              </span>
+              <EmailTagsInput
+                className="mt-1"
+                value={form.contactEmail}
+                invalid={!!fieldErrors.contactEmail}
+                aria-invalid={fieldErrors.contactEmail ? "true" : undefined}
+                onChange={(contactEmail) => {
+                  clearFieldError("contactEmail");
+                  setForm({ ...form, contactEmail });
+                }}
+              />
+              {fieldErrors.contactEmail ? <p className="form-field-error">{fieldErrors.contactEmail}</p> : null}
+            </label>
+            <label className="block">
+              <span className="form-label-sm">Contact page URL</span>
+              <input
+                className="form-input-body"
+                placeholder="https://…"
+                value={form.contactPageUrl}
+                onChange={(e) => setForm({ ...form, contactPageUrl: e.target.value })}
+                onBlur={(e) =>
+                  setForm({
+                    ...form,
+                    contactPageUrl: e.target.value.trim() ? normalizeSiteUrlInput(e.target.value) : "",
+                  })
+                }
+              />
+            </label>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 lg:items-end">
+            <div className="min-w-0 lg:col-span-1">
+              <span className="form-label-sm">Payment methods</span>
+              <button type="button" onClick={() => setPayOpen(true)} className="form-trigger-body">
+                <span className={cn("truncate", form.paymentMethodIds.length ? "text-slate-900 dark:text-slate-100" : "text-slate-400 dark:text-slate-300")}>
+                  {form.paymentMethodIds.length ? `${form.paymentMethodIds.length} selected` : "Choose…"}
+                </span>
+                <ChevronDown className="h-4 w-4 shrink-0 text-slate-400 dark:text-slate-300" />
+              </button>
+            </div>
+            <label className="block min-w-0">
+              <span className="form-label-sm">Payment terms</span>
+              <select
+                className="form-input-body"
+                value={form.paymentTerms}
+                onChange={(e) => setForm({ ...form, paymentTerms: e.target.value as "ADVANCE" | "AFTER_LIVE_LINK" })}
+              >
+                <option value="ADVANCE">Advance</option>
+                <option value="AFTER_LIVE_LINK">After live link</option>
+              </select>
+            </label>
+            {form.paymentTerms === "AFTER_LIVE_LINK" ? (
+              <label className="block min-w-0">
+                <span className="form-label-sm">After live — timing</span>
+                <select
+                  className="form-input-body"
+                  value={form.afterLiveOptionId}
+                  onChange={(e) => setForm({ ...form, afterLiveOptionId: e.target.value })}
+                >
+                  <option value="">Choose…</option>
+                  {ref.afterLiveOptions.map((o) => (
+                    <option key={o.id} value={o.id}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="block">
+              <span className="form-label-sm">Deal status</span>
+              <select
+                className="form-input-body"
+                value={form.dealStatus}
+                onChange={(e) => setForm({ ...form, dealStatus: e.target.value as "DEAL_DONE" | "PENDING" })}
+              >
+                <option value="DEAL_DONE">Deal done</option>
+                <option value="PENDING">Pending</option>
+              </select>
+            </label>
+            <label className="block">
+              <span className="form-label-sm">Date added</span>
+              <input
+                type="date"
+                className="form-input-body"
+                value={form.recordDate}
+                onChange={(e) => setForm({ ...form, recordDate: e.target.value })}
+              />
+            </label>
+          </div>
+
           <label className="block">
-            <span className="form-label-sm">Email</span>
+            <span className="form-label-sm">Notes</span>
             <textarea
-              className={cn("form-input-body min-h-[72px] resize-y", fieldErrors.contactEmail && "form-input-body-invalid")}
-              rows={3}
-              placeholder="One or more emails, separated by comma, semicolon, or newline"
-              value={form.contactEmail}
-              onChange={(e) => {
-                clearFieldError("contactEmail");
-                setForm({ ...form, contactEmail: e.target.value });
-              }}
-            />
-            {fieldErrors.contactEmail ? <p className="form-field-error">{fieldErrors.contactEmail}</p> : null}
-          </label>
-          <label className="block">
-            <span className="form-label-sm">Contact page URL</span>
-            <input
-              className="form-input-body"
-              placeholder="https://…"
-              value={form.contactPageUrl}
-              onChange={(e) => setForm({ ...form, contactPageUrl: e.target.value })}
-              onBlur={(e) =>
-                setForm({
-                  ...form,
-                  contactPageUrl: e.target.value.trim() ? normalizeSiteUrlInput(e.target.value) : "",
-                })
-              }
+              className="form-input-body min-h-[56px] resize-y"
+              rows={2}
+              value={form.notes}
+              onChange={(e) => setForm({ ...form, notes: e.target.value })}
             />
           </label>
-        </div>
-
-        <div className="grid gap-3 sm:grid-cols-2">
-          <label className="block">
-            <span className="form-label-sm">Deal status</span>
-            <select
-              className="form-input-body"
-              value={form.dealStatus}
-              onChange={(e) => setForm({ ...form, dealStatus: e.target.value as "DEAL_DONE" | "PENDING" })}
-            >
-              <option value="DEAL_DONE">Deal done</option>
-              <option value="PENDING">Pending</option>
-            </select>
-          </label>
-          <label className="block">
-            <span className="form-label-sm">Date</span>
-            <input
-              type="date"
-              className="form-input-body"
-              value={form.recordDate}
-              onChange={(e) => setForm({ ...form, recordDate: e.target.value })}
-            />
-          </label>
-        </div>
-
-        <label className="block">
-          <span className="form-label-sm">Notes</span>
-          <textarea
-            className="form-input-body min-h-[56px] resize-y"
-            rows={2}
-            value={form.notes}
-            onChange={(e) => setForm({ ...form, notes: e.target.value })}
-          />
-        </label>
+        </FormSectionCard>
 
         <div className="mt-5">
           <button
             type="button"
-            className="btn-save-primary"
+            className="btn-save-primary inline-flex items-center gap-2"
+            disabled={saving}
             onClick={() => void save()}
           >
-            Save vendor
+            {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+            {vendorId ? "Save changes" : "Save vendor"}
           </button>
         </div>
       </div>

@@ -9,7 +9,7 @@ import {
   Max,
   Min,
 } from 'class-validator';
-import { LinkType, OrderStatus, PaymentTerms } from '@prisma/client';
+import { LinkType, OrderStatus, PaymentTerms, SeoLinkAttribute } from '@prisma/client';
 
 export class OrderBodyDto {
   @IsString()
@@ -20,6 +20,16 @@ export class OrderBodyDto {
 
   @IsEnum(LinkType)
   linkType!: LinkType;
+
+  @IsOptional()
+  @IsEnum(SeoLinkAttribute)
+  seoLinkAttribute?: SeoLinkAttribute;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Type(() => Number)
+  seoLinkQuantity?: number;
 
   @IsBoolean()
   articleWriting!: boolean;

@@ -28,7 +28,9 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" suppressHydrationWarning>
-      <body className={`${geistSans.variable} ${geistMono.variable} antialiased`}>
+      <body
+        className={`${geistSans.variable} ${geistMono.variable} min-h-screen bg-background antialiased dark:bg-black`}
+      >
         {/*
           Do not set className on <html> from React — hydration would overwrite `dark` from this script.
           Tailwind `dark:` variants use an ancestor `.dark` (we set it on document.documentElement).

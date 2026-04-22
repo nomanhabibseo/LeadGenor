@@ -1,0 +1,91 @@
+"use client";
+
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import Link from "next/link";
+import { useSession } from "next-auth/react";
+import { RotateCcw } from "lucide-react";
+import { apiFetch } from "@/lib/api";
+import { sessionQueryUserKey } from "@/lib/session-query-scope";
+
+type Folder = {
+  id: string;
+  name: string;
+  deletedAt: string | null;
+  _count: { templates: number };
+};
+
+export function EmailTemplatesTrashPage() {
+  const { data: session, status } = useSession();
+  const token = session?.accessToken;
+  const userKey = sessionQueryUserKey(session);
+  const qc = useQueryClient();
+
+  const { data: rows = [], isLoading, refetch } = useQuery({
+    queryKey: ["template-folders-trash", userKey],
+    queryFn: () => apiFetch<Folder[]>("/email-marketing/templates/folders/trash", token),
+    enabled: status === "authenticated" && !!token && !!userKey,
+  });
+
+  const restore = useMutation({
+    mutationFn: (id: string) =>
+      apiFetch(`/email-marketing/templates/folders/${id}/restore`, token, {
+        method: "POST",
+        body: JSON.stringify({}),
+      }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["template-folders-trash", userKey] });
+      void qc.invalidateQueries({ queryKey: ["template-folders", userKey] });
+    },
+  });
+
+  if (status !== "authenticated" || !token) {
+    return (
+      <div className="em-page p-8 text-center">
+        <Link href="/login" className="text-indigo-600 underline dark:text-indigo-400">
+          Sign in
+        </Link>
+      </div>
+    );
+  }
+
+  return (
+    <div className="em-page mx-auto max-w-4xl space-y-6 px-2 pb-16 sm:px-4">
+      <h1 className="text-2xl font-bold text-slate-900 dark:text-white">Templates — trash</h1>
+      <p className="text-sm text-slate-600 dark:text-slate-400">
+        Deleted folders appear here with all templates inside. Restore brings the folder and its templates back to{" "}
+        <Link className="font-semibold text-indigo-600 underline dark:text-indigo-400" href="/email-marketing/templates">
+          Templates
+        </Link>
+        .
+      </p>
+      {isLoading ? (
+        <p className="text-slate-500">Loading…</p>
+      ) : rows.length === 0 ? (
+        <div className="em-card py-12 text-center text-slate-600 dark:text-slate-400">Trash is empty.</div>
+      ) : (
+        <ul className="space-y-2">
+          {rows.map((r) => (
+            <li
+              key={r.id}
+              className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-200 bg-white px-4 py-3 dark:border-slate-600 dark:bg-slate-800/65"
+            >
+              <div>
+                <div className="font-semibold text-slate-900 dark:text-white">{r.name}</div>
+                <div className="text-xs text-slate-500">{r._count.templates} template(s) in folder</div>
+              </div>
+              <button
+                type="button"
+                className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-medium text-slate-800 hover:bg-slate-50 dark:border-slate-600 dark:text-slate-100 dark:hover:bg-slate-700"
+                disabled={restore.isPending}
+                onClick={() => void restore.mutateAsync(r.id).then(() => void refetch())}
+              >
+                <RotateCcw className="h-4 w-4" />
+                Restore folder
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}

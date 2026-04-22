@@ -27,7 +27,7 @@ export function PickerModal({
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 p-3 dark:bg-black/70 sm:items-center sm:p-4">
       <div
         className={cn(
-          "flex max-h-[80vh] w-full flex-col rounded-xl bg-white shadow-2xl dark:border dark:border-slate-600 dark:bg-slate-900 dark:shadow-2xl",
+          "flex max-h-[80vh] w-full flex-col rounded-xl bg-white shadow-2xl dark:border dark:border-slate-600 dark:bg-slate-800 dark:shadow-2xl",
           compact ? "max-w-sm" : "max-w-lg",
         )}
         role="dialog"

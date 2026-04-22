@@ -13,6 +13,7 @@
     "dev:api": "npm run start:dev -w @leadgenor/api",
     "build": "npm run build -ws --if-present",
     "db:generate": "npm run generate -w @leadgenor/db",
+    "db:migrate:deploy": "npm run migrate:deploy -w @leadgenor/db",
     "db:migrate": "npm run migrate:dev -w @leadgenor/db",
     "db:seed": "npm run seed -w @leadgenor/db",
     "db:studio": "npm run studio -w @leadgenor/db",

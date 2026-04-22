@@ -1,5 +1,5 @@
 import { BadRequestException, Body, Controller, Get, Patch, UseGuards } from '@nestjs/common';
-import { IsInt, IsOptional, IsString, Max, Min, MinLength } from 'class-validator';
+import { IsIn, IsInt, IsObject, IsOptional, IsString, Max, Min, MinLength } from 'class-validator';
 import * as bcrypt from 'bcryptjs';
 import { CurrentUser, JwtUser } from '../common/decorators/current-user.decorator';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
@@ -7,9 +7,25 @@ import { PrismaService } from '../prisma/prisma.service';
 
 class TrashRetentionDto {
   @IsInt()
-  @Min(7)
-  @Max(28)
+  @Min(1)
+  @Max(365)
   trashRetentionDays!: number;
+}
+
+class UserSettingsDto {
+  @IsOptional()
+  @IsIn(['light', 'dark', 'system'])
+  themePreference?: 'light' | 'dark' | 'system';
+
+  @IsOptional()
+  @IsObject()
+  trashToggles?: Record<string, boolean>;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(365)
+  trashRetentionDays?: number;
 }
 
 class UpdateProfileDto {
@@ -38,7 +54,14 @@ export class UsersController {
   async me(@CurrentUser() user: JwtUser) {
     return this.prisma.user.findUniqueOrThrow({
       where: { id: user.userId },
-      select: { id: true, email: true, name: true, trashRetentionDays: true },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        trashRetentionDays: true,
+        themePreference: true,
+        trashToggles: true,
+      },
     });
   }
 
@@ -66,14 +89,28 @@ export class UsersController {
     if (Object.keys(data).length === 0) {
       return this.prisma.user.findUniqueOrThrow({
         where: { id: user.userId },
-        select: { id: true, email: true, name: true, trashRetentionDays: true },
+        select: {
+          id: true,
+          email: true,
+          name: true,
+          trashRetentionDays: true,
+          themePreference: true,
+          trashToggles: true,
+        },
       });
     }
 
     return this.prisma.user.update({
       where: { id: user.userId },
       data,
-      select: { id: true, email: true, name: true, trashRetentionDays: true },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        trashRetentionDays: true,
+        themePreference: true,
+        trashToggles: true,
+      },
     });
   }
 
@@ -82,7 +119,45 @@ export class UsersController {
     return this.prisma.user.update({
       where: { id: user.userId },
       data: { trashRetentionDays: body.trashRetentionDays },
-      select: { id: true, trashRetentionDays: true },
+      select: {
+        id: true,
+        trashRetentionDays: true,
+        themePreference: true,
+        trashToggles: true,
+      },
+    });
+  }
+
+  @Patch('me/settings')
+  async patchSettings(@CurrentUser() user: JwtUser, @Body() body: UserSettingsDto) {
+    const data: {
+      themePreference?: string;
+      trashToggles?: object;
+      trashRetentionDays?: number;
+    } = {};
+    if (body.themePreference !== undefined) data.themePreference = body.themePreference;
+    if (body.trashToggles !== undefined) data.trashToggles = body.trashToggles;
+    if (body.trashRetentionDays !== undefined) data.trashRetentionDays = body.trashRetentionDays;
+    if (Object.keys(data).length === 0) {
+      return this.prisma.user.findUniqueOrThrow({
+        where: { id: user.userId },
+        select: {
+          id: true,
+          trashRetentionDays: true,
+          themePreference: true,
+          trashToggles: true,
+        },
+      });
+    }
+    return this.prisma.user.update({
+      where: { id: user.userId },
+      data,
+      select: {
+        id: true,
+        trashRetentionDays: true,
+        themePreference: true,
+        trashToggles: true,
+      },
     });
   }
 }

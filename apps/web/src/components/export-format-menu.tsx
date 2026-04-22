@@ -53,7 +53,7 @@ export function ExportFormatMenu({
         <button
           type="button"
           disabled={disabled || busy || total === 0}
-          className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-800 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
+          className="btn-toolbar-outline disabled:opacity-50"
           onClick={() => setOpen((o) => !o)}
         >
           <Download className="h-4 w-4" />
@@ -61,7 +61,7 @@ export function ExportFormatMenu({
           <ChevronDown className="h-3.5 w-3.5 opacity-70" />
         </button>
         {open && (
-          <div className="absolute right-0 z-40 mt-1 min-w-[10rem] rounded-lg border border-slate-200 bg-white py-1 shadow-lg dark:border-slate-600 dark:bg-slate-900">
+          <div className="absolute right-0 z-40 mt-1 min-w-[10rem] rounded-lg border border-slate-200 bg-white py-1 shadow-lg dark:border-slate-600 dark:bg-slate-800">
             <button
               type="button"
               className="block w-full px-3 py-2 text-left text-sm hover:bg-slate-50 dark:hover:bg-slate-800"
@@ -104,7 +104,7 @@ export function ExportFormatMenu({
 
       {chunkKind && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="w-full max-w-sm rounded-xl border border-slate-200 bg-white p-4 shadow-xl dark:border-slate-600 dark:bg-slate-900">
+          <div className="w-full max-w-sm rounded-xl border border-slate-200 bg-white p-4 shadow-xl dark:border-slate-600 dark:bg-slate-800">
             <p className="text-sm text-slate-800 dark:text-slate-100">
               Your list has {total} rows. Export the first batch:
             </p>

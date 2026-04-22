@@ -3,12 +3,13 @@
 import Link from "next/link";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSession } from "next-auth/react";
-import { useCallback, useMemo, useState } from "react";
-import { CalendarRange, Plus } from "lucide-react";
+import { useCallback, useMemo, useRef, useState } from "react";
+import { CalendarRange, ExternalLink, Eye, Pencil, Plus, RotateCcw, Trash2 } from "lucide-react";
+import { useAppDialog } from "@/contexts/app-dialog-context";
 import { apiFetch, apiUrl } from "@/lib/api";
 import { ExportFormatMenu, type ExportChunk } from "@/components/export-format-menu";
 import { TablePagination } from "@/components/table-pagination";
-import { StatusPill } from "@/components/status-pill";
+import { OrderStatusTablePill } from "@/components/table-status-badges";
 import { cn } from "@/lib/utils";
 
 const PAGE_SIZE = 50;
@@ -24,27 +25,29 @@ type OrderRow = {
   currency: { code: string; symbol: string };
 };
 
+type OrderListPayload = {
+  data: OrderRow[];
+  total: number;
+  page: number;
+  limit: number;
+};
+
 type OrderScope = "all" | "completed" | "pending" | "trash";
+
+type DashboardOrderCounts = {
+  completedOrders: number;
+  pendingOrders: number;
+};
+
+function siteHref(u: string) {
+  const t = u.trim();
+  return t.startsWith("http") ? t : `https://${t}`;
+}
 
 function linkTypeLabel(lt: string) {
   if (lt === "GUEST_POST") return "Guest post";
   if (lt === "NICHE_EDIT") return "Niche edit";
   return lt;
-}
-
-function orderStatusPill(status: string) {
-  const s = status.toUpperCase();
-  if (s === "COMPLETED") {
-    return <StatusPill variant="done">Done</StatusPill>;
-  }
-  if (s === "PENDING") {
-    return <StatusPill variant="pending">Pending</StatusPill>;
-  }
-  return (
-    <span className="inline-block rounded-full bg-slate-500 px-3 py-1 text-xs font-semibold text-white">
-      {status}
-    </span>
-  );
 }
 
 function buildOrdersUrl(
@@ -82,6 +85,7 @@ export function OrderTable({
   const { data: session } = useSession();
   const token = session?.accessToken;
   const qc = useQueryClient();
+  const { showAlert, showConfirm } = useAppDialog();
   const [searchUrl, setSearchUrl] = useState("");
   const [page, setPage] = useState(1);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -91,6 +95,8 @@ export function OrderTable({
   const [appliedFrom, setAppliedFrom] = useState("");
   const [appliedTo, setAppliedTo] = useState("");
   const [exportBusy, setExportBusy] = useState(false);
+  const undoBannerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [undoTrashBanner, setUndoTrashBanner] = useState<{ id: string } | null>(null);
 
   const isTrash = scope === "trash";
 
@@ -109,6 +115,12 @@ export function OrderTable({
         limit: number;
       }>(listUrl, token),
     enabled: !!token,
+  });
+
+  const { data: dashStats, isLoading: statsLoading } = useQuery({
+    queryKey: ["stats", "dashboard"],
+    queryFn: () => apiFetch<DashboardOrderCounts>("/stats/dashboard", token),
+    enabled: !!token && !isTrash,
   });
 
   const rows = useMemo(() => data?.data ?? [], [data?.data]);
@@ -180,7 +192,7 @@ export function OrderTable({
         body: JSON.stringify(body),
       });
       if (!res.ok) {
-        alert((await res.text()) || "Export failed");
+        void showAlert((await res.text()) || "Export failed");
         return;
       }
       const blob = await res.blob();
@@ -234,33 +246,56 @@ export function OrderTable({
 
   async function softDeleteOrder(id: string) {
     if (!token) return;
-    if (!confirm("Move this order to trash?")) return;
+    if (!(await showConfirm("Move this order to trash?"))) return;
+    const snapshots = qc.getQueriesData<OrderListPayload>({ queryKey: ["orders"] });
+    qc.setQueriesData<OrderListPayload>({ queryKey: ["orders"] }, (old) => {
+      if (!old) return old;
+      return {
+        ...old,
+        data: old.data.filter((r) => r.id !== id),
+        total: Math.max(0, old.total - 1),
+      };
+    });
+    setSelected((s) => {
+      const n = new Set(s);
+      n.delete(id);
+      return n;
+    });
     const res = await fetch(apiUrl(`/orders/${id}`), {
       method: "DELETE",
       headers: { Authorization: `Bearer ${token}` },
     });
     if (!res.ok) {
-      alert((await res.text()) || "Delete failed");
+      snapshots.forEach(([key, data]) => {
+        qc.setQueryData(key, data);
+      });
+      void showAlert((await res.text()) || "Delete failed");
       return;
     }
-    setSelected((s) => {
-      const n = new Set(s);
-      n.delete(id);
-      return n;
-    });
+    setUndoTrashBanner({ id });
+    if (undoBannerTimerRef.current) clearTimeout(undoBannerTimerRef.current);
+    undoBannerTimerRef.current = setTimeout(() => setUndoTrashBanner(null), 20000);
     void qc.invalidateQueries({ queryKey: ["orders"] });
     void qc.invalidateQueries({ queryKey: ["stats"] });
   }
 
-  async function restoreOrder(id: string) {
-    if (!token) return;
+  async function restoreOrderFromUndo() {
+    if (!undoTrashBanner || !token) return;
+    const ok = await restoreOrder(undoTrashBanner.id);
+    if (!ok) return;
+    if (undoBannerTimerRef.current) clearTimeout(undoBannerTimerRef.current);
+    setUndoTrashBanner(null);
+  }
+
+  async function restoreOrder(id: string): Promise<boolean> {
+    if (!token) return false;
     const res = await fetch(apiUrl(`/orders/${id}/restore`), {
       method: "POST",
       headers: { Authorization: `Bearer ${token}` },
     });
     if (!res.ok) {
-      alert((await res.text()) || "Restore failed");
-      return;
+      void showAlert((await res.text()) || "Restore failed");
+      return false;
     }
     setSelected((s) => {
       const n = new Set(s);
@@ -269,17 +304,18 @@ export function OrderTable({
     });
     void qc.invalidateQueries({ queryKey: ["orders"] });
     void qc.invalidateQueries({ queryKey: ["stats"] });
+    return true;
   }
 
   async function permanentDeleteOrder(id: string) {
     if (!token) return;
-    if (!confirm("Permanently delete this order? This cannot be undone.")) return;
+    if (!(await showConfirm("Permanently delete this order? This cannot be undone."))) return;
     const res = await fetch(apiUrl(`/orders/${id}/permanent`), {
       method: "DELETE",
       headers: { Authorization: `Bearer ${token}` },
     });
     if (!res.ok) {
-      alert((await res.text()) || "Delete failed");
+      void showAlert((await res.text()) || "Delete failed");
       return;
     }
     setSelected((s) => {
@@ -293,9 +329,29 @@ export function OrderTable({
 
   return (
     <div className="-mx-1 max-w-none px-1 md:-mx-2 md:px-2">
-      <h1 className="text-2xl font-semibold text-slate-900 dark:text-slate-100">
-        {title}
-      </h1>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <h1 className="text-2xl font-semibold text-slate-900 dark:text-slate-100">
+          {title}
+        </h1>
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <ExportFormatMenu
+            total={total}
+            selectionCount={selected.size}
+            disabled={exportBusy || rows.length === 0}
+            busy={exportBusy}
+            showPdf
+            onExportCsv={(c) => void downloadExport("csv", c)}
+            onExportExcel={(c) => void downloadExport("xlsx", c)}
+            onExportPdf={() => exportPdf()}
+          />
+          {!isTrash ? (
+            <Link href="/orders/new" className="btn-toolbar-primary">
+              <Plus className="h-4 w-4" aria-hidden />
+              Create order
+            </Link>
+          ) : null}
+        </div>
+      </div>
 
       <div className="mt-4 space-y-3 text-xs text-slate-600 dark:text-slate-400">
         <p>
@@ -305,28 +361,52 @@ export function OrderTable({
           {selected.size > 0 ? ` — ${selected.size} selected` : ""}
         </p>
 
-        <div className="flex flex-col gap-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            className="table-toolbar-search self-start sm:self-center"
+            value={searchUrl}
+            placeholder="Search client or vendor site…"
+            aria-label="Search"
+            onChange={(e) => {
+              setPage(1);
+              setSearchUrl(e.target.value);
+            }}
+          />
           <div className="flex flex-wrap items-center gap-2">
-            <label className="flex min-w-0 flex-col gap-1 sm:flex-row sm:items-center sm:gap-2">
-              <span className="shrink-0 text-sm font-medium text-slate-700 dark:text-slate-200">
-                Search URL
-              </span>
-              <input
-                className="min-w-0 w-full rounded border border-slate-300 px-2 py-1 text-sm sm:w-56 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
-                value={searchUrl}
-                placeholder="Client or vendor site…"
-                onChange={(e) => {
-                  setPage(1);
-                  setSearchUrl(e.target.value);
-                }}
-              />
-            </label>
-
             {!isTrash ? (
               <>
+                {statsLoading || !dashStats ? (
+                  <span className="text-[11px] text-slate-400">Loading lists…</span>
+                ) : (
+                  <>
+                    <Link
+                      href="/orders"
+                      className={cn("scope-pill", scope === "all" && "scope-pill-active")}
+                    >
+                      All (
+                      {dashStats.completedOrders + dashStats.pendingOrders}
+                      )
+                    </Link>
+                    <Link
+                      href="/orders/completed"
+                      className={cn(
+                        "scope-pill",
+                        scope === "completed" && "scope-pill-active",
+                      )}
+                    >
+                      Completed ({dashStats.completedOrders})
+                    </Link>
+                    <Link
+                      href="/orders/pending"
+                      className={cn("scope-pill", scope === "pending" && "scope-pill-active")}
+                    >
+                      Pending ({dashStats.pendingOrders})
+                    </Link>
+                  </>
+                )}
                 <button
                   type="button"
-                  className={cn("btn-filter", dateOpen && "btn-filter-active")}
+                  className={cn("btn-filter h-8 py-1", dateOpen && "btn-filter-active")}
                   onClick={() => {
                     if (!dateOpen) {
                       setDraftFrom(appliedFrom);
@@ -347,7 +427,7 @@ export function OrderTable({
                 {dateFilterActive ? (
                   <button
                     type="button"
-                    className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-800 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-100 dark:hover:bg-slate-800"
+                    className="inline-flex h-8 items-center rounded-lg border border-slate-300 px-3 text-sm font-medium text-slate-800 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-100 dark:hover:bg-slate-800"
                     onClick={() => clearDateFilter()}
                   >
                     Clear date filter
@@ -355,31 +435,11 @@ export function OrderTable({
                 ) : null}
               </>
             ) : null}
-
-            <ExportFormatMenu
-              total={total}
-              selectionCount={selected.size}
-              disabled={exportBusy || rows.length === 0}
-              busy={exportBusy}
-              showPdf
-              onExportCsv={(c) => void downloadExport("csv", c)}
-              onExportExcel={(c) => void downloadExport("xlsx", c)}
-              onExportPdf={() => exportPdf()}
-            />
-
-            {!isTrash ? (
-              <div className="ml-auto flex shrink-0">
-                <Link href="/orders/new" className="btn-toolbar-primary">
-                  <Plus className="h-4 w-4" aria-hidden />
-                  Create new order
-                </Link>
-              </div>
-            ) : null}
           </div>
         </div>
 
         {!isTrash && dateOpen ? (
-          <div className="flex flex-wrap items-end gap-3 rounded-xl border border-slate-200 bg-slate-50/80 p-4 dark:border-slate-600 dark:bg-slate-900/50">
+          <div className="flex flex-wrap items-end gap-3 rounded-xl border border-slate-200 bg-slate-50/80 p-4 dark:border-slate-600 dark:bg-slate-800/55">
             <label className="text-xs font-medium text-slate-700 dark:text-slate-200">
               Date from
               <input
@@ -409,44 +469,57 @@ export function OrderTable({
         ) : null}
       </div>
 
+      {!isTrash && undoTrashBanner ? (
+        <div className="mt-4 flex items-center justify-between rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm text-emerald-950 dark:border-emerald-500/35 dark:bg-emerald-950/30 dark:text-emerald-100">
+          <span>Order moved to trash.</span>
+          <button type="button" className="font-medium underline" onClick={() => void restoreOrderFromUndo()}>
+            Undo
+          </button>
+        </div>
+      ) : null}
+
       {isLoading && <p className="mt-4">Loading…</p>}
 
-      <div className="mt-4 overflow-x-auto rounded-lg border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900">
-        <table className="min-w-full text-left text-sm">
-          <thead className="border-b bg-slate-50 dark:border-slate-600 dark:bg-slate-800">
+      <div className="data-table-shell mt-4">
+        <table className="min-w-full text-center text-[11px]">
+          <thead className="data-table-thead">
             <tr>
-              <th className="p-2">
+              <th className="w-10 p-2.5 align-middle">
                 <input
                   type="checkbox"
+                  className="mx-auto block"
                   checked={
                     allIds.length > 0 && selected.size === allIds.length
                   }
                   onChange={toggleAll}
                 />
               </th>
-              <th className="p-2">Client site</th>
-              <th className="p-2">Vendor site</th>
-              <th className="p-2">Link type</th>
-              <th className="p-2">Status</th>
-              <th className="p-2">Total price</th>
-              <th className="p-2">Date</th>
-              <th className="p-2">Actions</th>
+              <th className="w-10 p-2.5">#</th>
+              <th className="min-w-[9rem] p-2.5">Client site</th>
+              <th className="min-w-[9rem] p-2.5">Vendor site</th>
+              <th className="p-2.5">Link type</th>
+              <th className="p-2.5">Status</th>
+              <th className="p-2.5">Total price</th>
+              <th className="p-2.5">Date</th>
+              <th className="p-2.5">Actions</th>
             </tr>
           </thead>
           <tbody>
-            {rows.map((r) => {
+            {rows.map((r, rowIdx) => {
               const tp =
                 typeof r.totalPayment === "object"
                   ? r.totalPayment.toString()
                   : r.totalPayment;
+              const rowNum = (page - 1) * limit + rowIdx + 1;
               return (
                 <tr
                   key={r.id}
-                  className="border-b border-slate-100 dark:border-slate-700"
+                  className="data-table-row"
                 >
-                  <td className="p-2">
+                  <td className="data-table-td">
                     <input
                       type="checkbox"
+                      className="mx-auto block"
                       checked={selected.has(r.id)}
                       onChange={() => {
                         const n = new Set(selected);
@@ -456,58 +529,112 @@ export function OrderTable({
                       }}
                     />
                   </td>
-                  <td className="max-w-[10rem] truncate p-2 text-xs text-sky-700 dark:text-sky-400">
-                    {r.client.siteUrl}
+                  <td className="data-table-td tabular-nums text-slate-500 dark:text-slate-400">
+                    {rowNum}
                   </td>
-                  <td className="max-w-[10rem] truncate p-2 text-xs text-sky-700 dark:text-sky-400">
-                    {r.vendor.siteUrl}
+                  <td className="data-table-td max-w-[11rem] align-top">
+                    <div className="mx-auto flex max-w-full min-w-0 items-center justify-center gap-1">
+                      <a
+                        href={siteHref(r.client.siteUrl)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="min-w-0 truncate font-medium text-sky-700 hover:underline dark:text-sky-400"
+                      >
+                        {r.client.siteUrl.replace(/^https?:\/\//, "")}
+                      </a>
+                      <a
+                        href={siteHref(r.client.siteUrl)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="shrink-0 text-slate-400 hover:text-sky-600"
+                        aria-label="Open client site"
+                      >
+                        <ExternalLink className="h-3 w-3" />
+                      </a>
+                    </div>
                   </td>
-                  <td className="whitespace-nowrap p-2 text-xs">
+                  <td className="data-table-td max-w-[11rem] align-top">
+                    <div className="mx-auto flex max-w-full min-w-0 items-center justify-center gap-1">
+                      <a
+                        href={siteHref(r.vendor.siteUrl)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="min-w-0 truncate font-medium text-sky-700 hover:underline dark:text-sky-400"
+                      >
+                        {r.vendor.siteUrl.replace(/^https?:\/\//, "")}
+                      </a>
+                      <a
+                        href={siteHref(r.vendor.siteUrl)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="shrink-0 text-slate-400 hover:text-sky-600"
+                        aria-label="Open vendor site"
+                      >
+                        <ExternalLink className="h-3 w-3" />
+                      </a>
+                    </div>
+                  </td>
+                  <td className="data-table-td whitespace-nowrap">
                     {linkTypeLabel(r.linkType)}
                   </td>
-                  <td className="p-2 align-middle">{orderStatusPill(r.status)}</td>
-                  <td className="whitespace-nowrap p-2 text-xs tabular-nums">
+                  <td className="data-table-td align-middle">
+                    <OrderStatusTablePill status={r.status} />
+                  </td>
+                  <td className="data-table-td whitespace-nowrap tabular-nums">
                     {r.currency.symbol}
                     {tp}
                   </td>
-                  <td className="whitespace-nowrap p-2 text-xs">
+                  <td className="data-table-td whitespace-nowrap">
                     {String(r.orderDate).slice(0, 10)}
                   </td>
-                  <td className="space-x-3 whitespace-nowrap p-2 text-xs">
-                    {!isTrash ? (
-                      <>
-                        <Link
-                          href={`/orders/${r.id}`}
-                          className="text-sky-600 hover:underline dark:text-sky-400"
-                        >
-                          View
-                        </Link>
-                        <button
-                          type="button"
-                          className="text-red-600 hover:underline dark:text-red-400"
-                          onClick={() => void softDeleteOrder(r.id)}
-                        >
-                          Delete
-                        </button>
-                      </>
-                    ) : (
-                      <>
-                        <button
-                          type="button"
-                          className="text-sky-600 hover:underline dark:text-sky-400"
-                          onClick={() => void restoreOrder(r.id)}
-                        >
-                          Restore
-                        </button>
-                        <button
-                          type="button"
-                          className="text-red-600 hover:underline dark:text-red-400"
-                          onClick={() => void permanentDeleteOrder(r.id)}
-                        >
-                          Delete permanently
-                        </button>
-                      </>
-                    )}
+                  <td className="data-table-td whitespace-nowrap">
+                    <div className="inline-flex flex-nowrap items-center justify-center gap-1">
+                      {!isTrash ? (
+                        <>
+                          <Link
+                            href={`/orders/${r.id}`}
+                            className="inline-flex rounded p-1.5 text-slate-600 hover:bg-slate-100 hover:text-sky-600 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-sky-400"
+                            title="View"
+                          >
+                            <Eye className="h-4 w-4" />
+                          </Link>
+                          <Link
+                            href={`/orders/${r.id}/edit`}
+                            className="inline-flex rounded p-1.5 text-slate-600 hover:bg-slate-100 hover:text-sky-600 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-sky-400"
+                            title="Edit"
+                          >
+                            <Pencil className="h-4 w-4" />
+                          </Link>
+                          <button
+                            type="button"
+                            className="inline-flex rounded p-1.5 text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/40"
+                            title="Delete"
+                            onClick={() => void softDeleteOrder(r.id)}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            className="inline-flex rounded p-1.5 text-sky-600 hover:bg-slate-100 dark:text-sky-400 dark:hover:bg-slate-800"
+                            title="Restore"
+                            onClick={() => void restoreOrder(r.id)}
+                          >
+                            <RotateCcw className="h-4 w-4" />
+                          </button>
+                          <button
+                            type="button"
+                            className="inline-flex rounded p-1.5 text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/40"
+                            title="Delete permanently"
+                            onClick={() => void permanentDeleteOrder(r.id)}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        </>
+                      )}
+                    </div>
                   </td>
                 </tr>
               );

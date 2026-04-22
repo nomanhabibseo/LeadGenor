@@ -11,22 +11,35 @@
   --muted: #64748b;
 }
 
+html {
+  min-height: 100%;
+  background: var(--background);
+}
+
 body {
+  min-height: 100%;
   color: var(--foreground);
   background: var(--background);
   font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
 }
 
-.dark body {
-  --background: #020617;
+/**
+ * Theme class is on `<html>` (see theme bootstrap script). Use `html.dark` so
+ * CSS variables apply even when `.dark` is not a wrapper around `body`.
+ */
+html.dark {
+  color-scheme: dark;
+  background-color: #000000;
+  /* App canvas: true black in dark mode (all pages). */
+  --background: #000000;
   --foreground: #f1f5f9;
   --surface-elevated: #0f172a;
   --surface-border: rgba(148, 163, 184, 0.12);
   --muted: #94a3b8;
 }
 
-.dark {
-  color-scheme: dark;
+html.dark body {
+  background-color: #000000;
 }
 
 @layer components {
@@ -48,10 +61,55 @@ body {
   }
 
   .btn-toolbar-primary {
-    @apply inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700;
+    @apply inline-flex h-8 items-center gap-1.5 rounded-lg bg-blue-600 px-3 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700;
   }
   .dark .btn-toolbar-primary {
     @apply bg-white text-slate-900 shadow-md hover:bg-slate-100;
+  }
+
+  /** Email / SMTP forms — slightly tinted fields (light: darker than white; dark: lighter than card) */
+  .app-field-input,
+  .app-field-select {
+    @apply mt-1 w-full rounded-lg border border-slate-200 bg-slate-100/90 px-3 py-2 text-slate-900 shadow-sm transition placeholder:text-slate-400 focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-500/20;
+  }
+  .dark .app-field-input,
+  .dark .app-field-select {
+    @apply border-slate-600 bg-slate-700/55 text-slate-100 placeholder:text-slate-400 focus:border-sky-400 focus:ring-sky-500/25;
+  }
+
+  /** Table toolbar — outline actions (Import, Export) — compact height */
+  .btn-toolbar-outline {
+    @apply inline-flex h-8 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-800 shadow-sm transition hover:bg-slate-50;
+  }
+  .dark .btn-toolbar-outline {
+    @apply border-slate-600 bg-slate-800 text-slate-100 hover:bg-slate-700;
+  }
+
+  /** Search field in list toolbars — match scope-pill (All) blue border on hover/focus */
+  .table-toolbar-search {
+    @apply h-8 w-full max-w-[220px] shrink-0 rounded-lg border border-slate-300 bg-white px-3 text-sm transition-colors placeholder:text-slate-400 hover:border-sky-500 focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-500/25 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 dark:placeholder:text-slate-500 dark:hover:border-sky-400 dark:focus:border-sky-400 dark:focus:ring-sky-500/25;
+  }
+
+  /** List tables — card shell + header row (dashboard list style) */
+  .data-table-shell {
+    @apply overflow-x-auto rounded-xl border border-slate-200/90 bg-white shadow-sm dark:border-slate-700/90 dark:bg-slate-800/50;
+  }
+  .data-table-thead {
+    @apply border-b border-slate-200 bg-slate-50/95 text-center text-[11px] font-semibold uppercase tracking-wider text-slate-500 dark:border-slate-700 dark:bg-slate-700/75 dark:text-slate-400;
+  }
+  /** Default body cell: smaller type, centered (list pages) */
+  .data-table-td {
+    @apply p-2.5 text-center align-middle text-[11px] text-slate-700 dark:text-slate-300;
+  }
+  .data-table-row {
+    @apply border-b border-slate-100 transition-colors hover:bg-slate-50/90 dark:border-slate-700/80 dark:hover:bg-slate-700/30;
+  }
+  /** Scope pills (vendors / orders lists) */
+  .scope-pill {
+    @apply inline-flex h-8 shrink-0 items-center rounded-full border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 shadow-sm transition hover:border-slate-300 hover:bg-slate-50 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200 dark:hover:border-slate-500 dark:hover:bg-slate-700;
+  }
+  .scope-pill-active {
+    @apply border-brand-600 bg-brand-50 text-brand-900 ring-1 ring-brand-500/20 dark:border-cyan-500/70 dark:bg-slate-700 dark:text-cyan-100 dark:ring-cyan-500/20;
   }
 
   /** Table toolbar — Filter button (solid blue) */
@@ -69,10 +127,10 @@ body {
   }
 
   .form-input {
-    @apply mt-1.5 w-full rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-slate-900 shadow-sm transition placeholder:text-slate-400 focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/20;
+    @apply mt-1.5 w-full rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-slate-900 shadow-sm transition placeholder:text-slate-400 hover:border-sky-400 focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-500/20;
   }
   .dark .form-input {
-    @apply border-slate-600 bg-slate-900/80 text-slate-100 placeholder:text-slate-300 focus:border-cyan-500/60 focus:ring-cyan-500/20;
+    @apply border-slate-600 bg-slate-800/80 text-slate-100 placeholder:text-slate-300 hover:border-sky-500/50 focus:border-sky-400 focus:ring-sky-500/25;
   }
   .form-label {
     @apply text-sm font-medium text-slate-700;
@@ -96,13 +154,13 @@ body {
     @apply rounded-2xl border border-slate-200/80 bg-white p-6 shadow-card;
   }
   .dark .panel {
-    @apply border-slate-700/80 bg-slate-900/90 shadow-none ring-1 ring-slate-700/50;
+    @apply border-slate-700/80 bg-slate-800/90 shadow-none ring-1 ring-slate-700/50;
   }
   .form-input-sm {
-    @apply mt-1 w-full rounded-lg border border-slate-200/90 bg-slate-50/40 px-3 py-2 text-sm text-slate-900 shadow-sm transition placeholder:text-slate-400 focus:border-brand-500 focus:bg-white focus:outline-none focus:ring-2 focus:ring-brand-500/20;
+    @apply mt-1 w-full rounded-lg border border-slate-200/90 bg-slate-50/40 px-3 py-2 text-sm text-slate-900 shadow-sm transition placeholder:text-slate-400 hover:border-sky-400 focus:border-sky-500 focus:bg-white focus:outline-none focus:ring-2 focus:ring-sky-500/20;
   }
   .dark .form-input-sm {
-    @apply border-slate-600 bg-slate-900/60 text-slate-100 placeholder:text-slate-300 focus:border-cyan-500/50 focus:bg-slate-900 focus:ring-cyan-500/20;
+    @apply border-slate-600 bg-slate-800/60 text-slate-100 placeholder:text-slate-300 hover:border-sky-500/50 focus:border-sky-400 focus:bg-slate-800 focus:ring-sky-500/25;
   }
   .form-label-sm {
     @apply text-xs font-medium text-slate-600;
@@ -111,10 +169,10 @@ body {
     @apply text-slate-100;
   }
   .form-trigger-sm {
-    @apply mt-1 flex h-10 w-full items-center justify-between gap-2 rounded-lg border border-slate-200/90 bg-slate-50/40 px-3 text-left text-sm text-slate-900 shadow-sm transition hover:border-slate-300 hover:bg-white focus:border-brand-500 focus:bg-white focus:outline-none focus:ring-2 focus:ring-brand-500/20;
+    @apply mt-1 flex h-10 w-full items-center justify-between gap-2 rounded-lg border border-slate-200/90 bg-slate-50/40 px-3 text-left text-sm text-slate-900 shadow-sm transition hover:border-sky-400 hover:bg-white focus:border-sky-500 focus:bg-white focus:outline-none focus:ring-2 focus:ring-sky-500/20;
   }
   .dark .form-trigger-sm {
-    @apply border-slate-600 bg-slate-900/60 text-slate-100 hover:border-slate-500 hover:bg-slate-800 focus:border-cyan-500/50 focus:bg-slate-900 focus:ring-cyan-500/20;
+    @apply border-slate-600 bg-slate-800/60 text-slate-100 hover:border-sky-500/50 hover:bg-slate-700 focus:border-sky-400 focus:bg-slate-800 focus:ring-sky-500/25;
   }
   .form-field-error {
     @apply mt-0.5 text-xs text-red-600;
@@ -132,27 +190,68 @@ body {
   }
   /** White fields on dashboard grey body (tray-style) */
   .form-input-body {
-    @apply mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm transition placeholder:text-slate-400 focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/20;
+    @apply mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm transition placeholder:text-slate-400 hover:border-sky-400 focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-500/20;
   }
   .dark .form-input-body {
-    @apply border-slate-600 bg-slate-900/70 text-slate-100 placeholder:text-slate-300 focus:border-cyan-500/50 focus:ring-cyan-500/20;
+    @apply border-slate-600 bg-slate-800/75 text-slate-100 placeholder:text-slate-300 hover:border-sky-500/50 focus:border-sky-400 focus:ring-sky-500/25;
   }
   .form-trigger-body {
-    @apply mt-1 flex h-10 w-full items-center justify-between gap-2 rounded-lg border border-slate-200 bg-white px-3 text-left text-sm text-slate-900 shadow-sm transition hover:border-slate-300 focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/20;
+    @apply mt-1 flex h-10 w-full items-center justify-between gap-2 rounded-lg border border-slate-200 bg-white px-3 text-left text-sm text-slate-900 shadow-sm transition hover:border-sky-400 focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-500/20;
   }
   .dark .form-trigger-body {
-    @apply border-slate-600 bg-slate-900/70 text-slate-100 hover:border-slate-500 focus:border-cyan-500/50 focus:ring-cyan-500/20;
+    @apply border-slate-600 bg-slate-800/75 text-slate-100 hover:border-sky-500/50 focus:border-sky-400 focus:ring-sky-500/25;
   }
   .form-section-card {
     @apply rounded-xl border border-slate-200/90 bg-gradient-to-br from-slate-50/90 to-white p-4 shadow-sm ring-1 ring-slate-100/80;
   }
   .dark .form-section-card {
-    @apply border-slate-700/80 bg-gradient-to-br from-slate-900/80 to-slate-950/90 ring-slate-700/50;
+    @apply border-slate-700/80 bg-gradient-to-br from-slate-800/80 to-slate-900/90 ring-slate-700/50;
   }
   .form-section-card-title {
     @apply mb-3 text-xs font-semibold uppercase tracking-wide text-slate-500;
   }
   .dark .form-section-card-title {
     @apply text-slate-100;
+  }
+
+  /** Email marketing — indigo accent, screenshot-style lists */
+  .em-page {
+    @apply min-h-[70vh] bg-[#f8f9fc] pb-16 dark:bg-black;
+  }
+  .em-card {
+    @apply rounded-2xl border border-sky-400/40 bg-white p-5 shadow-sm transition hover:border-sky-400/70 dark:border-slate-600 dark:bg-slate-800/60 dark:hover:border-sky-500/40;
+  }
+  .em-btn-primary {
+    @apply inline-flex h-9 shrink-0 items-center gap-2 rounded-xl bg-indigo-600 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/35;
+  }
+  .dark .em-btn-primary {
+    @apply bg-indigo-500 hover:bg-indigo-600;
+  }
+  .em-btn-outline {
+    @apply inline-flex h-9 items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 text-sm font-medium text-slate-800 shadow-sm transition hover:bg-slate-50 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 dark:hover:bg-slate-700;
+  }
+  .em-icon-btn {
+    @apply inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 shadow-sm transition hover:bg-slate-50 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700;
+  }
+  .em-icon-btn-danger {
+    @apply border-red-200 text-red-600 hover:bg-red-50 dark:border-red-900/40 dark:text-red-400 dark:hover:bg-red-950/40;
+  }
+  .em-table-thead {
+    @apply border-b border-slate-200 bg-slate-50/95 text-center text-[11px] font-semibold uppercase tracking-wider text-slate-500 dark:border-slate-700 dark:bg-slate-700/75 dark:text-slate-400;
+  }
+
+  /** Email template editor — blue hover/active borders (use with `.email-template-form` wrapper) */
+  .tpl-field {
+    @apply w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm transition hover:border-sky-400 focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-500/20;
+  }
+  .dark .tpl-field {
+    @apply border-slate-600 bg-slate-800 text-slate-100 hover:border-sky-500/50 focus:border-sky-400 focus:ring-sky-500/25;
+  }
+
+  .tpl-body-shell {
+    @apply overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm transition hover:border-sky-400 focus-within:border-sky-500 focus-within:ring-2 focus-within:ring-sky-500/20;
+  }
+  .dark .tpl-body-shell {
+    @apply border-slate-600 bg-slate-800 focus-within:border-sky-400 focus-within:ring-sky-500/25;
   }
 }

@@ -27,6 +27,13 @@ enum LinkType {
   NICHE_EDIT
 }
 
+/** SEO rel / disclosure for placements (vendor default + per-order). */
+enum SeoLinkAttribute {
+  DO_FOLLOW
+  NO_FOLLOW
+  SPONSORED
+}
+
 enum OrderStatus {
   COMPLETED
   PENDING
@@ -38,12 +45,356 @@ model User {
   passwordHash       String?
   name               String?
   trashRetentionDays Int      @default(28)
+  /** light | dark | system */
+  themePreference    String   @default("system")
+  /** Per-module trash UI: { vendors?, clients?, ... } — omitted keys default to enabled */
+  trashToggles       Json?
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 
   vendors Vendor[]
   clients Client[]
   orders  Order[]
+
+  emailLists          EmailList[]
+  templateFolders     TemplateFolder[]
+  emailTemplates      EmailTemplate[]
+  emailAccounts       EmailAccount[]
+  campaigns           Campaign[]
+  emailSuppressions   EmailSuppression[]
+  inboxMessages       InboxMessage[]
+  oauthStates         OAuthState[]
+  emailOAuthPendings  EmailOAuthPending[]
+}
+
+enum EmailListAutoUpdate {
+  OFF
+  DAILY
+  WEEKLY
+  MONTHLY
+}
+
+enum ListContactKind {
+  VENDOR
+  CLIENT
+  IMPORT
+}
+
+enum EmailRiskLevel {
+  UNKNOWN
+  UNVERIFIED
+  RISKY
+  INVALID
+  OK
+}
+
+enum EmailAccountProvider {
+  SMTP
+  GMAIL_API
+  GMAIL_SMTP
+  OUTLOOK
+  OTHER
+}
+
+enum SmtpEncryption {
+  SSL
+  TLS
+  NONE
+}
+
+enum CampaignStatus {
+  DRAFT
+  SCHEDULED
+  RUNNING
+  PAUSED
+  COMPLETED
+}
+
+enum CampaignRecipientStatus {
+  PENDING
+  QUEUED
+  ACTIVE
+  COMPLETED
+  FAILED
+  UNSUBSCRIBED
+  SKIPPED
+}
+
+enum MultiEmailPolicy {
+  ALL
+  FIRST
+}
+
+enum MissingVariablePolicy {
+  TO_CHECK_LIST
+  SEND_ANYWAY
+}
+
+model EmailList {
+  id               String              @id @default(cuid())
+  userId           String
+  user             User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name             String
+  autoUpdate       EmailListAutoUpdate @default(OFF)
+  lastAutoUpdateAt DateTime?
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+  deletedAt        DateTime?
+
+  items     EmailListItem[]
+  campaigns Campaign[]
+
+  @@unique([userId, name])
+  @@index([userId, deletedAt])
+}
+
+model EmailListItem {
+  id                 String           @id @default(cuid())
+  listId             String
+  list               EmailList        @relation(fields: [listId], references: [id], onDelete: Cascade)
+  siteUrl            String
+  siteUrlNormalized  String
+  companyName        String           @default("")
+  contactName        String           @default("")
+  contactKind        ListContactKind  @default(IMPORT)
+  niche              String           @default("")
+  country            String           @default("")
+  traffic            Int              @default(0)
+  dr                 Int              @default(0)
+  da                 Int              @default(0)
+  authorityScore     Int              @default(0)
+  backlinks          Int              @default(0)
+  referringDomains   Int              @default(0)
+  emails             Json             @default("[]")
+  emailRisk          EmailRiskLevel   @default(UNKNOWN)
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+
+  campaignRecipients CampaignRecipient[]
+
+  @@index([listId, siteUrlNormalized])
+}
+
+model TemplateFolder {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  deletedAt DateTime?
+
+  templates EmailTemplate[]
+
+  @@index([userId, deletedAt])
+}
+
+model EmailTemplate {
+  id                      String          @id @default(cuid())
+  userId                  String
+  user                    User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  folderId                String
+  folder                  TemplateFolder  @relation(fields: [folderId], references: [id], onDelete: Cascade)
+  name                    String
+  subject                 String          @default("")
+  body                    String          @default("")
+  includeUnsubscribeBlock Boolean         @default(false)
+  createdAt               DateTime        @default(now())
+  updatedAt               DateTime        @updatedAt
+  deletedAt               DateTime?
+
+  @@index([folderId, deletedAt])
+  @@index([userId, deletedAt])
+}
+
+model EmailAccount {
+  id                   String               @id @default(cuid())
+  userId               String
+  user                 User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider             EmailAccountProvider @default(SMTP)
+  displayName          String
+  fromEmail            String
+  tag                  String
+  smtpHost             String?
+  smtpPort             Int?
+  smtpUser             String?
+  smtpPasswordEnc      String?
+  smtpEncryption       SmtpEncryption       @default(TLS)
+  oauthRefreshEnc      String?
+  oauthAccessEnc       String?
+  oauthExpiresAt       DateTime?
+  externalProviderId   String?
+  dailyLimit           Int                  @default(10)
+  delayMinSec          Int                  @default(200)
+  delayMaxSec          Int                  @default(200)
+  signature            String               @default("")
+  bcc                  String               @default("")
+  imapHost             String?
+  imapPort             Int?
+  imapUser             String?
+  imapPasswordEnc      String?
+  imapEncryption       SmtpEncryption       @default(TLS)
+  sentToday            Int                  @default(0)
+  /** Lifetime sends (campaign + similar); increments with each successful send. */
+  sentTotal            Int                  @default(0)
+  /** Earliest time this account may send the next message (per-account inter-send delay). */
+  nextSendAllowedAt    DateTime?
+  sentTodayDate        DateTime?            @db.Date
+  /** Set when SMTP (+ IMAP if configured) verification succeeds. */
+  connectionVerifiedAt DateTime?
+  /** Set when last verification failed or credentials are unusable. */
+  connectionInvalid    Boolean              @default(false)
+  createdAt            DateTime             @default(now())
+  updatedAt            DateTime             @updatedAt
+  deletedAt            DateTime?
+
+  inboxMessages InboxMessage[]
+
+  @@unique([userId, tag])
+  @@index([userId, deletedAt])
+}
+
+model EmailOAuthPending {
+  id              String   @id @default(cuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider        String
+  refreshTokenEnc String
+  accessTokenEnc  String?
+  accessExpiresAt DateTime?
+  candidates      Json
+  createdAt       DateTime @default(now())
+  expiresAt       DateTime
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model Campaign {
+  id                       String                 @id @default(cuid())
+  userId                   String
+  user                     User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name                     String
+  emailListId              String
+  emailList                EmailList              @relation(fields: [emailListId], references: [id], onDelete: Restrict)
+  status                   CampaignStatus         @default(DRAFT)
+  wizardStep               Int                    @default(1)
+  senderAccountIds         Json                   @default("[]")
+  doNotSendUnverified      Boolean                @default(false)
+  doNotSendRisky           Boolean                @default(false)
+  doNotSendInvalid         Boolean                @default(false)
+  multiEmailPolicy         MultiEmailPolicy       @default(FIRST)
+  skipIfInOtherCampaign    Boolean                @default(false)
+  missingVariablePolicy    MissingVariablePolicy  @default(TO_CHECK_LIST)
+  mainSequence             Json                   @default("[]")
+  followUpSequence         Json                   @default("[]")
+  followUpStartRule        Json?
+  stopFollowUpsOnReply     Boolean                @default(true)
+  stopCampaignOnCompanyReply Boolean              @default(true)
+  dailyCampaignLimit       Int?
+  scheduledAt              DateTime?
+  startedAt                DateTime?
+  completedAt              DateTime?
+  checkListEntries         Json                   @default("[]")
+  pauseReason              String?
+  mainFlowGraph            Json?
+  createdAt                DateTime               @default(now())
+  updatedAt                DateTime               @updatedAt
+  deletedAt                DateTime?
+
+  recipients CampaignRecipient[]
+
+  @@index([userId, status])
+  @@index([userId, deletedAt])
+  @@index([emailListId])
+}
+
+model CampaignRecipient {
+  id              String                    @id @default(cuid())
+  campaignId      String
+  campaign        Campaign                  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  emailListItemId String
+  emailListItem   EmailListItem             @relation(fields: [emailListItemId], references: [id], onDelete: Cascade)
+  phase           String                    @default("main")
+  stepIndex       Int                       @default(0)
+  nextSendAt      DateTime?
+  lastSentAt      DateTime?
+  status          CampaignRecipientStatus   @default(PENDING)
+  opened          Boolean                   @default(false)
+  replied         Boolean                   @default(false)
+  failReason      String?
+  targetEmail     String                    @default("")
+  createdAt       DateTime                  @default(now())
+  updatedAt       DateTime                  @updatedAt
+
+  openEvents EmailOpenEvent[]
+
+  @@index([campaignId, emailListItemId])
+  @@index([campaignId, nextSendAt, status])
+}
+
+model EmailOpenEvent {
+  id           String            @id @default(cuid())
+  recipientId  String
+  recipient    CampaignRecipient @relation(fields: [recipientId], references: [id], onDelete: Cascade)
+  createdAt    DateTime          @default(now())
+
+  @@index([recipientId])
+}
+
+model EmailSuppression {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  emailNorm String
+  reason    String   @default("unsubscribe")
+  createdAt DateTime @default(now())
+
+  @@unique([userId, emailNorm])
+}
+
+model UnsubscribeToken {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  userId    String
+  emailNorm String
+  expiresAt DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model InboxMessage {
+  id                 String        @id @default(cuid())
+  userId             String
+  user               User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  emailAccountId     String?
+  emailAccount       EmailAccount? @relation(fields: [emailAccountId], references: [id], onDelete: SetNull)
+  externalThreadId   String?
+  /** Provider message id (Gmail message id or Graph message id) for sync upsert. */
+  externalMessageId  String?
+  /** inbox | sent | drafts — normalized folder key after sync. */
+  folder             String        @default("inbox")
+  snippet            String        @default("")
+  fromAddr           String        @default("")
+  subject            String        @default("")
+  receivedAt         DateTime      @default(now())
+  campaignId         String?
+  bodyPreview        String        @default("")
+  createdAt          DateTime      @default(now())
+
+  @@index([userId, emailAccountId, folder, receivedAt])
+  @@unique([emailAccountId, externalMessageId])
+}
+
+model OAuthState {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider  String
+  state     String   @unique
+  createdAt DateTime @default(now())
+  expiresAt DateTime
 }
 
 model Currency {
@@ -113,6 +464,8 @@ model Vendor {
   referringDomains  Int       @default(0)
   backlinks         Int       @default(0)
   trustFlow         Int       @default(0)
+  seoLinkAttribute  SeoLinkAttribute @default(DO_FOLLOW)
+  seoLinkQuantity   Int       @default(1)
   tatUnit           TatUnit
   tatValue          Int
   currencyId        String
@@ -229,6 +582,8 @@ model Order {
   vendorId             String
   vendor               Vendor       @relation(fields: [vendorId], references: [id], onDelete: Restrict)
   linkType             LinkType
+  seoLinkAttribute     SeoLinkAttribute @default(DO_FOLLOW)
+  seoLinkQuantity      Int          @default(1)
   resellerPrice        Decimal      @db.Decimal(18, 4)
   vendorCost           Decimal      @db.Decimal(18, 4)
   articleWriting       Boolean      @default(false)

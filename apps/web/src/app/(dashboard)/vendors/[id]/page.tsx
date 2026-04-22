@@ -17,6 +17,8 @@ type VendorDetail = {
   referringDomains: number;
   backlinks: number;
   trustFlow: number;
+  seoLinkAttribute: string;
+  seoLinkQuantity: number;
   tatUnit: string;
   tatValue: number;
   guestPostCost: string | number;
@@ -41,6 +43,12 @@ type VendorDetail = {
 function dec(v: string | number) {
   if (typeof v === "number") return String(v);
   return v;
+}
+
+function seoLinkAttrLabel(a: string) {
+  if (a === "NO_FOLLOW") return "No-follow";
+  if (a === "SPONSORED") return "Sponsored";
+  return "Do-follow";
 }
 
 function DetailCard({ title, children }: { title: string; children: React.ReactNode }) {
@@ -149,6 +157,10 @@ export default function VendorViewPage() {
 
       <DetailCard title="TAT & pricing">
         <dl>
+          <Row
+            label="Link type"
+            value={`${v.seoLinkQuantity} × ${seoLinkAttrLabel(v.seoLinkAttribute)}`}
+          />
           <Row label="Turnaround (TAT)" value={tatLabel} />
           <Row label="Currency" value={`${v.currency.code} (${v.currency.symbol}) — ${v.currency.name}`} />
           <Row

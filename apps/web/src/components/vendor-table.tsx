@@ -6,18 +6,29 @@ import { useSession } from "next-auth/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronDown,
+  ExternalLink,
+  Eye,
   FileUp,
   Filter,
   LayoutGrid,
+  Pencil,
   Plus,
+  RotateCcw,
+  Trash2,
+  X,
 } from "lucide-react";
+import { useAppDialog } from "@/contexts/app-dialog-context";
 import { apiFetch, apiUrl } from "@/lib/api";
 import { ExportFormatMenu, type ExportChunk } from "@/components/export-format-menu";
 import { TablePagination } from "@/components/table-pagination";
 import { ImportSpreadsheetModal } from "@/components/import-spreadsheet-modal";
 import { useReference } from "@/hooks/use-reference";
 import { appendRangeParams } from "@/lib/range-query";
-import { StatusPill } from "@/components/status-pill";
+import {
+  DealStatusTablePill,
+  DrTableMeter,
+  NicheTablePill,
+} from "@/components/table-status-badges";
 import { cn } from "@/lib/utils";
 import {
   countriesShortList,
@@ -42,6 +53,13 @@ type Row = {
   completedOrderCount?: number;
 };
 
+type VendorListPayload = {
+  data: Row[];
+  total: number;
+  page: number;
+  limit: number;
+};
+
 /** Single-field ranges: e.g. "10 - 50" or "100" */
 type VendorFilters = {
   nicheId: string;
@@ -59,6 +77,26 @@ type VendorFilters = {
   paymentTerms: "" | "ADVANCE" | "AFTER_LIVE_LINK";
   dealStatus: "" | DealStatus;
 };
+
+const VENDOR_EXTRA_ORDER: { key: keyof VendorFilters; label: string }[] = [
+  { key: "ne", label: "Niche edit resell (min – max)" },
+  { key: "mozDa", label: "Moz DA (min – max)" },
+  { key: "as", label: "Authority score (min – max)" },
+  { key: "tat", label: "TAT value (min – max)" },
+  { key: "ref", label: "Ref. domains (min – max)" },
+  { key: "backlinks", label: "Backlinks (min – max)" },
+  { key: "paymentTerms", label: "Payment terms" },
+  { key: "dealStatus", label: "Deal status" },
+];
+
+const VENDOR_BASE_FILTER_KEYS: { key: keyof VendorFilters; label: string }[] = [
+  { key: "nicheId", label: "Niche" },
+  { key: "countryId", label: "Country" },
+  { key: "languageId", label: "Language" },
+  { key: "traffic", label: "Traffic (min – max)" },
+  { key: "dr", label: "DR (min – max)" },
+  { key: "gp", label: "Guest post resell (min – max)" },
+];
 
 const emptyFilters = (): VendorFilters => ({
   nicheId: "",
@@ -101,6 +139,12 @@ const defaultCols: Record<ColKey, boolean> = {
 function dealLabel(s: DealStatus) {
   return s === "DEAL_DONE" ? "Done" : "Pending";
 }
+
+type DashboardVendorCounts = {
+  totalVendors: number;
+  dealDoneVendors: number;
+  pendingDeals: number;
+};
 
 function buildVendorListUrl(
   scope: string,
@@ -151,20 +195,20 @@ export function VendorTable({
   const { data: session } = useSession();
   const token = session?.accessToken;
   const qc = useQueryClient();
+  const { showAlert, showConfirm } = useAppDialog();
   const { data: ref, isLoading: refLoading } = useReference();
   const [searchUrl, setSearchUrl] = useState("");
   const [page, setPage] = useState(1);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const deleteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [pendingDelete, setPendingDelete] = useState<string | null>(null);
-  const [confirmPermanent, setConfirmPermanent] = useState<{
-    ids: string[];
-    qty: number;
-  } | null>(null);
-
+  const undoBannerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [undoTrashBanner, setUndoTrashBanner] = useState<{ id: string } | null>(null);
   const scopeAllowsDealFilter = scope === "all";
   const [filterOpen, setFilterOpen] = useState(false);
-  const [moreFilters, setMoreFilters] = useState(false);
+  const [activeVendorExtras, setActiveVendorExtras] = useState<Set<string>>(() => new Set());
+  const [activeVendorBaseFilters, setActiveVendorBaseFilters] = useState<Set<string>>(
+    () => new Set(VENDOR_BASE_FILTER_KEYS.map((x) => String(x.key))),
+  );
+  const [extraPickerOpen, setExtraPickerOpen] = useState(false);
   const [draft, setDraft] = useState<VendorFilters>(emptyFilters);
   const [applied, setApplied] = useState<VendorFilters>(emptyFilters);
 
@@ -214,6 +258,12 @@ export function VendorTable({
     enabled: !!token,
   });
 
+  const { data: dashStats, isLoading: statsLoading } = useQuery({
+    queryKey: ["stats", "dashboard"],
+    queryFn: () => apiFetch<DashboardVendorCounts>("/stats/dashboard", token),
+    enabled: !!token && scope !== "trash",
+  });
+
   const rows = useMemo(() => data?.data ?? [], [data?.data]);
   const total = data?.total ?? 0;
   const limit = data?.limit ?? PAGE_SIZE;
@@ -225,6 +275,7 @@ export function VendorTable({
 
   const openFilterPanel = useCallback(() => {
     setDraft(applied);
+    setExtraPickerOpen(false);
     setFilterOpen(true);
   }, [applied]);
 
@@ -237,38 +288,107 @@ export function VendorTable({
     const z = emptyFilters();
     setDraft(z);
     setApplied(z);
+    setActiveVendorExtras(new Set());
+    setActiveVendorBaseFilters(new Set(VENDOR_BASE_FILTER_KEYS.map((x) => String(x.key))));
+    setExtraPickerOpen(false);
     setPage(1);
   }, []);
+
+  function addVendorExtra(key: keyof VendorFilters) {
+    setActiveVendorExtras((prev) => new Set(prev).add(String(key)));
+    setExtraPickerOpen(false);
+  }
+
+  function removeVendorExtra(key: keyof VendorFilters) {
+    setActiveVendorExtras((prev) => {
+      const n = new Set(prev);
+      n.delete(String(key));
+      return n;
+    });
+    const blank = emptyFilters();
+    setDraft((d) => ({ ...d, [key]: blank[key] }));
+  }
+
+  function removeVendorBaseFilter(key: keyof VendorFilters) {
+    setActiveVendorBaseFilters((prev) => {
+      const n = new Set(prev);
+      n.delete(String(key));
+      return n;
+    });
+    const blank = emptyFilters();
+    setDraft((d) => ({ ...d, [key]: blank[key] }));
+  }
+
+  function addVendorBaseFilter(key: keyof VendorFilters) {
+    setActiveVendorBaseFilters((prev) => new Set(prev).add(String(key)));
+    setExtraPickerOpen(false);
+  }
+
+  function vendorBaseFieldFilled(key: keyof VendorFilters): boolean {
+    const v = draft[key];
+    return typeof v === "string" && v.trim() !== "";
+  }
+
+  function vendorExtraFieldFilled(key: keyof VendorFilters): boolean {
+    const v = draft[key];
+    if (key === "paymentTerms" || key === "dealStatus") return v !== "";
+    return typeof v === "string" && v.trim() !== "";
+  }
 
   function toggleAll() {
     if (selected.size === allIds.length) setSelected(new Set());
     else setSelected(new Set(allIds));
   }
 
-  async function deleteRow(id: string) {
+  async function confirmSoftDeleteVendor(id: string) {
+    if (!(await showConfirm("Move this vendor to trash?"))) return;
     if (!token) return;
-    await fetch(apiUrl(`/vendors/${id}`), {
+    const snapshots = qc.getQueriesData<VendorListPayload>({ queryKey: ["vendors"] });
+    qc.setQueriesData<VendorListPayload>({ queryKey: ["vendors"] }, (old) => {
+      if (!old) return old;
+      return {
+        ...old,
+        data: old.data.filter((r) => r.id !== id),
+        total: Math.max(0, old.total - 1),
+      };
+    });
+    setSelected((s) => {
+      const n = new Set(s);
+      n.delete(id);
+      return n;
+    });
+    const res = await fetch(apiUrl(`/vendors/${id}`), {
       method: "DELETE",
       headers: { Authorization: `Bearer ${token}` },
     });
+    if (!res.ok) {
+      snapshots.forEach(([key, data]) => {
+        qc.setQueryData(key, data);
+      });
+      void showAlert((await res.text()) || "Could not move vendor to trash.");
+      return;
+    }
+    setUndoTrashBanner({ id });
+    if (undoBannerTimerRef.current) clearTimeout(undoBannerTimerRef.current);
+    undoBannerTimerRef.current = setTimeout(() => setUndoTrashBanner(null), 20000);
     void qc.invalidateQueries({ queryKey: ["vendors"] });
     void qc.invalidateQueries({ queryKey: ["stats"] });
   }
 
-  function scheduleDelete(id: string) {
-    if (deleteTimerRef.current) clearTimeout(deleteTimerRef.current);
-    setPendingDelete(id);
-    deleteTimerRef.current = setTimeout(() => {
-      void deleteRow(id);
-      setPendingDelete(null);
-      deleteTimerRef.current = null;
-    }, 5000);
-  }
-
-  function cancelDelete() {
-    if (deleteTimerRef.current) clearTimeout(deleteTimerRef.current);
-    deleteTimerRef.current = null;
-    setPendingDelete(null);
+  async function restoreVendorFromUndo() {
+    if (!undoTrashBanner || !token) return;
+    const res = await fetch(apiUrl(`/vendors/${undoTrashBanner.id}/restore`), {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) {
+      void showAlert((await res.text()) || "Could not restore vendor.");
+      return;
+    }
+    if (undoBannerTimerRef.current) clearTimeout(undoBannerTimerRef.current);
+    setUndoTrashBanner(null);
+    void qc.invalidateQueries({ queryKey: ["vendors"] });
+    void qc.invalidateQueries({ queryKey: ["stats"] });
   }
 
   async function bulkPrice(payload: {
@@ -278,7 +398,7 @@ export function VendorTable({
   }) {
     if (!token) return;
     if (!payload.guestPost && !payload.nicheEdit) {
-      alert("Select Guest post and/or Niche edit.");
+      void showAlert("Select Guest post and/or Niche edit.");
       return;
     }
     const res = await fetch(apiUrl("/vendors/bulk-price"), {
@@ -298,7 +418,7 @@ export function VendorTable({
       try {
         const j = JSON.parse(errText) as { message?: unknown };
         const msg = j.message;
-        alert(
+        void showAlert(
           typeof msg === "string"
             ? msg
             : Array.isArray(msg)
@@ -306,7 +426,7 @@ export function VendorTable({
               : errText || "Bulk price update failed",
         );
       } catch {
-        alert(errText || "Bulk price update failed");
+        void showAlert(errText || "Bulk price update failed");
       }
       return;
     }
@@ -323,7 +443,6 @@ export function VendorTable({
       });
     }
     setSelected(new Set());
-    setConfirmPermanent(null);
     void qc.invalidateQueries({ queryKey: ["vendors"] });
     void qc.invalidateQueries({ queryKey: ["stats"] });
   }
@@ -428,7 +547,7 @@ export function VendorTable({
         body: JSON.stringify(body),
       });
       if (!res.ok) {
-        alert((await res.text()) || "Export failed");
+        void showAlert((await res.text()) || "Export failed");
         return;
       }
       const blob = await res.blob();
@@ -449,7 +568,7 @@ export function VendorTable({
 
   function exportPdf() {
     if (rows.length === 0) {
-      alert("No rows to export.");
+      void showAlert("No rows to export.");
       return;
     }
     const ids = exportIds;
@@ -511,11 +630,42 @@ export function VendorTable({
 
   return (
     <div className="-mx-1 max-w-none px-1 md:-mx-2 md:px-2">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <h1 className="text-2xl font-semibold text-slate-900 dark:text-slate-100">
           {title}
         </h1>
-        {showBulkPrice && <BulkPriceButton onApply={(p) => void bulkPrice(p)} />}
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          {showBulkPrice ? <BulkPriceButton onApply={(p) => void bulkPrice(p)} /> : null}
+          {scope !== "trash" ? (
+            <>
+              <button
+                type="button"
+                className="btn-toolbar-outline"
+                onClick={() => {
+                  setImportMsg(null);
+                  setImportOpen(true);
+                }}
+              >
+                <FileUp className="h-4 w-4 text-brand-600 dark:text-cyan-400" />
+                Import
+              </button>
+              <ExportFormatMenu
+                total={total}
+                selectionCount={selected.size}
+                disabled={exportBusy || rows.length === 0}
+                busy={exportBusy}
+                showPdf
+                onExportCsv={(c) => void downloadExport("csv", c)}
+                onExportExcel={(c) => void downloadExport("xlsx", c)}
+                onExportPdf={() => exportPdf()}
+              />
+              <Link href="/vendors/new" className="btn-toolbar-primary">
+                <Plus className="h-4 w-4" aria-hidden />
+                Add vendor
+              </Link>
+            </>
+          ) : null}
+        </div>
       </div>
 
       <div className="mt-4 space-y-3 text-xs text-slate-600 dark:text-slate-400">
@@ -529,132 +679,120 @@ export function VendorTable({
           ) : null}
         </p>
 
-        <div className="flex flex-col gap-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            className="table-toolbar-search self-start sm:self-center"
+            value={searchUrl}
+            onChange={(e) => {
+              setPage(1);
+              setSearchUrl(e.target.value);
+            }}
+            placeholder="Search URL, niche, country…"
+            aria-label="Search"
+          />
           <div className="flex flex-wrap items-center gap-2">
-            <label className="flex min-w-0 flex-col gap-1 sm:flex-row sm:items-center sm:gap-2">
-              <span className="shrink-0 text-sm font-medium text-slate-700 dark:text-slate-200">
-                Search URL
-              </span>
-              <input
-                className="min-w-0 w-full rounded border border-slate-300 px-2 py-1 text-sm sm:w-56 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
-                value={searchUrl}
-                onChange={(e) => {
-                  setPage(1);
-                  setSearchUrl(e.target.value);
-                }}
-                placeholder="Search URL…"
-              />
-            </label>
+            {scope !== "trash" ? (
+              <>
+                {statsLoading || !dashStats ? (
+                  <span className="text-[11px] text-slate-400">Loading lists…</span>
+                ) : (
+                  <>
+                    <Link
+                      href="/vendors"
+                      className={cn("scope-pill", scope === "all" && "scope-pill-active")}
+                    >
+                      All ({dashStats.totalVendors})
+                    </Link>
+                    <Link
+                      href="/vendors/deal-done"
+                      className={cn("scope-pill", scope === "deal_done" && "scope-pill-active")}
+                    >
+                      Deal done ({dashStats.dealDoneVendors})
+                    </Link>
+                    <Link
+                      href="/vendors/pending"
+                      className={cn("scope-pill", scope === "pending" && "scope-pill-active")}
+                    >
+                      Pending deals ({dashStats.pendingDeals})
+                    </Link>
+                  </>
+                )}
+              </>
+            ) : null}
 
+          <button
+            type="button"
+            className={cn("btn-filter h-8 py-1", filterOpen && "btn-filter-active")}
+            onClick={() => (filterOpen ? setFilterOpen(false) : openFilterPanel())}
+          >
+            <Filter className="h-4 w-4" />
+            Filter
+            {hasActiveFilters ? (
+              <span className="rounded-full bg-white/25 px-1.5 text-[10px] text-white">
+                on
+              </span>
+            ) : null}
+          </button>
+
+          {hasActiveFilters ? (
             <button
               type="button"
-              className={cn("btn-filter", filterOpen && "btn-filter-active")}
-              onClick={() => (filterOpen ? setFilterOpen(false) : openFilterPanel())}
+              className="inline-flex h-8 items-center rounded-lg border border-slate-300 px-3 text-sm font-medium text-slate-800 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-100 dark:hover:bg-slate-800"
+              onClick={() => {
+                clearFilters();
+                setFilterOpen(false);
+              }}
             >
-              <Filter className="h-4 w-4" />
-              Filter
-              {hasActiveFilters ? (
-                <span className="rounded-full bg-white/25 px-1.5 text-[10px] text-white">
-                  on
-                </span>
-              ) : null}
+              Clear filter
             </button>
+          ) : null}
 
-            {hasActiveFilters ? (
-              <button
-                type="button"
-                className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-800 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-100 dark:hover:bg-slate-800"
-                onClick={() => {
-                  clearFilters();
-                  setFilterOpen(false);
-                }}
-              >
-                Clear filter
-              </button>
-            ) : null}
-
-            {scope !== "trash" && (
-              <>
+          <div className="relative">
+            <button
+              type="button"
+              className="btn-toolbar-outline"
+              onClick={() => setColsOpen((o) => !o)}
+            >
+              <LayoutGrid className="h-4 w-4" />
+              Columns
+              <ChevronDown className="h-3.5 w-3.5 opacity-70" />
+            </button>
+            {colsOpen && (
+              <div className="absolute right-0 z-40 mt-1 w-56 rounded-lg border border-slate-200 bg-white p-2 shadow-lg dark:border-slate-600 dark:bg-slate-800">
+                <p className="mb-2 text-xs font-medium text-slate-600 dark:text-slate-300">
+                  Show columns
+                </p>
+                <ul className="max-h-64 space-y-1 overflow-y-auto text-sm">
+                  {colLabels.map(({ key, label }) => (
+                    <li key={key}>
+                      <label className="flex cursor-pointer items-center gap-2 rounded px-1 py-0.5 hover:bg-slate-50 dark:hover:bg-slate-800">
+                        <input
+                          type="checkbox"
+                          checked={cols[key]}
+                          onChange={() =>
+                            setCols((c) => ({ ...c, [key]: !c[key] }))
+                          }
+                        />
+                        <span>{label}</span>
+                      </label>
+                    </li>
+                  ))}
+                </ul>
                 <button
                   type="button"
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-800 hover:bg-slate-50 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
-                  onClick={() => {
-                    setImportMsg(null);
-                    setImportOpen(true);
-                  }}
+                  className="mt-2 w-full rounded border border-slate-200 py-1 text-xs dark:border-slate-600"
+                  onClick={() => setColsOpen(false)}
                 >
-                  <FileUp className="h-4 w-4 text-brand-600 dark:text-cyan-400" />
-                  Import
+                  Close
                 </button>
-
-                <ExportFormatMenu
-                  total={total}
-                  selectionCount={selected.size}
-                  disabled={exportBusy || rows.length === 0}
-                  busy={exportBusy}
-                  showPdf
-                  onExportCsv={(c) => void downloadExport("csv", c)}
-                  onExportExcel={(c) => void downloadExport("xlsx", c)}
-                  onExportPdf={() => exportPdf()}
-                />
-              </>
-            )}
-
-            <div className="relative">
-              <button
-                type="button"
-                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-800 hover:bg-slate-50 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
-                onClick={() => setColsOpen((o) => !o)}
-              >
-                <LayoutGrid className="h-4 w-4" />
-                Columns
-                <ChevronDown className="h-3.5 w-3.5 opacity-70" />
-              </button>
-              {colsOpen && (
-                <div className="absolute right-0 z-40 mt-1 w-56 rounded-lg border border-slate-200 bg-white p-2 shadow-lg dark:border-slate-600 dark:bg-slate-900">
-                  <p className="mb-2 text-xs font-medium text-slate-600 dark:text-slate-300">
-                    Show columns
-                  </p>
-                  <ul className="max-h-64 space-y-1 overflow-y-auto text-sm">
-                    {colLabels.map(({ key, label }) => (
-                      <li key={key}>
-                        <label className="flex cursor-pointer items-center gap-2 rounded px-1 py-0.5 hover:bg-slate-50 dark:hover:bg-slate-800">
-                          <input
-                            type="checkbox"
-                            checked={cols[key]}
-                            onChange={() =>
-                              setCols((c) => ({ ...c, [key]: !c[key] }))
-                            }
-                          />
-                          <span>{label}</span>
-                        </label>
-                      </li>
-                    ))}
-                  </ul>
-                  <button
-                    type="button"
-                    className="mt-2 w-full rounded border border-slate-200 py-1 text-xs dark:border-slate-600"
-                    onClick={() => setColsOpen(false)}
-                  >
-                    Close
-                  </button>
-                </div>
-              )}
-            </div>
-
-            {scope !== "trash" ? (
-              <div className="ml-auto flex shrink-0">
-                <Link href="/vendors/new" className="btn-toolbar-primary">
-                  <Plus className="h-4 w-4" aria-hidden />
-                  Add new vendor
-                </Link>
               </div>
-            ) : null}
+            )}
+          </div>
           </div>
         </div>
 
         {filterOpen && (
-          <div className="rounded-xl border border-slate-200 bg-slate-50/80 p-4 dark:border-slate-600 dark:bg-slate-900/50">
+          <div className="rounded-xl border border-slate-200 bg-slate-50/80 p-4 dark:border-slate-600 dark:bg-slate-800/55">
             {refLoading || !ref ? (
               <p className="text-sm text-slate-600 dark:text-slate-400">
                 Loading filter options…
@@ -662,254 +800,320 @@ export function VendorTable({
             ) : (
               <>
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              <label className="block text-xs">
-                <span className="font-medium text-slate-700 dark:text-slate-200">
-                  Niche
-                </span>
-                <select
-                  className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1.5 text-sm dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
-                  value={draft.nicheId}
-                  onChange={(e) =>
-                    setDraft((d) => ({ ...d, nicheId: e.target.value }))
-                  }
-                >
-                  <option value="">Any</option>
-                  {ref.niches.map((n) => (
-                    <option key={n.id} value={n.id}>
-                      {n.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="block text-xs">
-                <span className="font-medium text-slate-700 dark:text-slate-200">
-                  Country
-                </span>
-                <select
-                  className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1.5 text-sm dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
-                  value={draft.countryId}
-                  onChange={(e) =>
-                    setDraft((d) => ({ ...d, countryId: e.target.value }))
-                  }
-                >
-                  <option value="">Any</option>
-                  {ref.countries.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.code} — {c.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="block text-xs">
-                <span className="font-medium text-slate-700 dark:text-slate-200">
-                  Language
-                </span>
-                <select
-                  className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1.5 text-sm dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
-                  value={draft.languageId}
-                  onChange={(e) =>
-                    setDraft((d) => ({ ...d, languageId: e.target.value }))
-                  }
-                >
-                  <option value="">Any</option>
-                  {ref.languages.map((l) => (
-                    <option key={l.id} value={l.id}>
-                      {l.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="block text-xs">
-                <span className="font-medium text-slate-700 dark:text-slate-200">
-                  Traffic (min – max)
-                </span>
-                <input
-                  type="text"
-                  placeholder="e.g. 1000 - 50000"
-                  className="mt-1 w-full rounded border border-slate-300 px-2 py-1.5 font-mono text-sm dark:border-slate-600 dark:bg-slate-800"
-                  value={draft.traffic}
-                  onChange={(e) =>
-                    setDraft((d) => ({ ...d, traffic: e.target.value }))
-                  }
-                />
-              </label>
-              <label className="block text-xs">
-                <span className="font-medium text-slate-700 dark:text-slate-200">
-                  DR (min – max)
-                </span>
-                <input
-                  type="text"
-                  placeholder="e.g. 20 - 70"
-                  className="mt-1 w-full rounded border border-slate-300 px-2 py-1.5 font-mono text-sm dark:border-slate-600 dark:bg-slate-800"
-                  value={draft.dr}
-                  onChange={(e) =>
-                    setDraft((d) => ({ ...d, dr: e.target.value }))
-                  }
-                />
-              </label>
-              <label className="block text-xs">
-                <span className="font-medium text-slate-700 dark:text-slate-200">
-                  Guest post resell (min – max)
-                </span>
-                <input
-                  type="text"
-                  placeholder="e.g. 50 - 200"
-                  className="mt-1 w-full rounded border border-slate-300 px-2 py-1.5 font-mono text-sm dark:border-slate-600 dark:bg-slate-800"
-                  value={draft.gp}
-                  onChange={(e) =>
-                    setDraft((d) => ({ ...d, gp: e.target.value }))
-                  }
-                />
-              </label>
+              {VENDOR_BASE_FILTER_KEYS.filter(({ key }) => activeVendorBaseFilters.has(String(key))).map(
+                ({ key, label }) => (
+                  <div
+                    key={key}
+                    className="group relative rounded-lg border border-slate-200/90 bg-white/70 p-2 pr-8 dark:border-slate-600 dark:bg-slate-900/40"
+                  >
+                    <button
+                      type="button"
+                      title="Remove filter"
+                      className={cn(
+                        "absolute right-1 top-1 rounded p-0.5 text-slate-500 transition hover:bg-slate-200 hover:text-slate-800 dark:hover:bg-slate-700 dark:hover:text-slate-100",
+                        vendorBaseFieldFilled(key)
+                          ? "opacity-100"
+                          : "opacity-0 group-hover:opacity-100",
+                      )}
+                      onClick={() => removeVendorBaseFilter(key)}
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                    {key === "nicheId" ? (
+                      <label className="block text-xs">
+                        <span className="font-medium text-slate-700 dark:text-slate-200">{label}</span>
+                        <select
+                          className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1.5 text-sm dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
+                          value={draft.nicheId}
+                          onChange={(e) => setDraft((d) => ({ ...d, nicheId: e.target.value }))}
+                        >
+                          <option value="">Any</option>
+                          {ref.niches.map((n) => (
+                            <option key={n.id} value={n.id}>
+                              {n.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : null}
+                    {key === "countryId" ? (
+                      <label className="block text-xs">
+                        <span className="font-medium text-slate-700 dark:text-slate-200">{label}</span>
+                        <select
+                          className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1.5 text-sm dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
+                          value={draft.countryId}
+                          onChange={(e) => setDraft((d) => ({ ...d, countryId: e.target.value }))}
+                        >
+                          <option value="">Any</option>
+                          {ref.countries.map((c) => (
+                            <option key={c.id} value={c.id}>
+                              {c.code} — {c.name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : null}
+                    {key === "languageId" ? (
+                      <label className="block text-xs">
+                        <span className="font-medium text-slate-700 dark:text-slate-200">{label}</span>
+                        <select
+                          className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1.5 text-sm dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
+                          value={draft.languageId}
+                          onChange={(e) => setDraft((d) => ({ ...d, languageId: e.target.value }))}
+                        >
+                          <option value="">Any</option>
+                          {ref.languages.map((l) => (
+                            <option key={l.id} value={l.id}>
+                              {l.name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : null}
+                    {key === "traffic" ? (
+                      <label className="block text-xs">
+                        <span className="font-medium text-slate-700 dark:text-slate-200">{label}</span>
+                        <input
+                          type="text"
+                          placeholder="e.g. 1000 - 50000"
+                          className="mt-1 w-full rounded border border-slate-300 px-2 py-1.5 font-mono text-sm dark:border-slate-600 dark:bg-slate-800"
+                          value={draft.traffic}
+                          onChange={(e) => setDraft((d) => ({ ...d, traffic: e.target.value }))}
+                        />
+                      </label>
+                    ) : null}
+                    {key === "dr" ? (
+                      <label className="block text-xs">
+                        <span className="font-medium text-slate-700 dark:text-slate-200">{label}</span>
+                        <input
+                          type="text"
+                          placeholder="e.g. 20 - 70"
+                          className="mt-1 w-full rounded border border-slate-300 px-2 py-1.5 font-mono text-sm dark:border-slate-600 dark:bg-slate-800"
+                          value={draft.dr}
+                          onChange={(e) => setDraft((d) => ({ ...d, dr: e.target.value }))}
+                        />
+                      </label>
+                    ) : null}
+                    {key === "gp" ? (
+                      <label className="block text-xs">
+                        <span className="font-medium text-slate-700 dark:text-slate-200">{label}</span>
+                        <input
+                          type="text"
+                          placeholder="e.g. 50 - 200"
+                          className="mt-1 w-full rounded border border-slate-300 px-2 py-1.5 font-mono text-sm dark:border-slate-600 dark:bg-slate-800"
+                          value={draft.gp}
+                          onChange={(e) => setDraft((d) => ({ ...d, gp: e.target.value }))}
+                        />
+                      </label>
+                    ) : null}
+                  </div>
+                ),
+              )}
             </div>
 
-            {moreFilters && (
+            {VENDOR_EXTRA_ORDER.some(({ key }) => activeVendorExtras.has(String(key))) ? (
               <div className="mt-3 grid gap-3 border-t border-slate-200 pt-3 dark:border-slate-600 sm:grid-cols-2 lg:grid-cols-3">
-                <label className="block text-xs">
-                  <span className="font-medium text-slate-700 dark:text-slate-200">
-                    Niche edit resell (min – max)
-                  </span>
-                  <input
-                    type="text"
-                    placeholder="min - max"
-                    className="mt-1 w-full rounded border border-slate-300 px-2 py-1.5 font-mono text-sm dark:border-slate-600 dark:bg-slate-800"
-                    value={draft.ne}
-                    onChange={(e) =>
-                      setDraft((d) => ({ ...d, ne: e.target.value }))
-                    }
-                  />
-                </label>
-                <label className="block text-xs">
-                  <span className="font-medium text-slate-700 dark:text-slate-200">
-                    Moz DA (min – max)
-                  </span>
-                  <input
-                    type="text"
-                    placeholder="min - max"
-                    className="mt-1 w-full rounded border border-slate-300 px-2 py-1.5 font-mono text-sm dark:border-slate-600 dark:bg-slate-800"
-                    value={draft.mozDa}
-                    onChange={(e) =>
-                      setDraft((d) => ({ ...d, mozDa: e.target.value }))
-                    }
-                  />
-                </label>
-                <label className="block text-xs">
-                  <span className="font-medium text-slate-700 dark:text-slate-200">
-                    Authority score (min – max)
-                  </span>
-                  <input
-                    type="text"
-                    placeholder="min - max"
-                    className="mt-1 w-full rounded border border-slate-300 px-2 py-1.5 font-mono text-sm dark:border-slate-600 dark:bg-slate-800"
-                    value={draft.as}
-                    onChange={(e) =>
-                      setDraft((d) => ({ ...d, as: e.target.value }))
-                    }
-                  />
-                </label>
-                <label className="block text-xs">
-                  <span className="font-medium text-slate-700 dark:text-slate-200">
-                    TAT value (min – max)
-                  </span>
-                  <input
-                    type="text"
-                    placeholder="min - max"
-                    className="mt-1 w-full rounded border border-slate-300 px-2 py-1.5 font-mono text-sm dark:border-slate-600 dark:bg-slate-800"
-                    value={draft.tat}
-                    onChange={(e) =>
-                      setDraft((d) => ({ ...d, tat: e.target.value }))
-                    }
-                  />
-                </label>
-                <label className="block text-xs">
-                  <span className="font-medium text-slate-700 dark:text-slate-200">
-                    Ref. domains (min – max)
-                  </span>
-                  <input
-                    type="text"
-                    placeholder="min - max"
-                    className="mt-1 w-full rounded border border-slate-300 px-2 py-1.5 font-mono text-sm dark:border-slate-600 dark:bg-slate-800"
-                    value={draft.ref}
-                    onChange={(e) =>
-                      setDraft((d) => ({ ...d, ref: e.target.value }))
-                    }
-                  />
-                </label>
-                <label className="block text-xs">
-                  <span className="font-medium text-slate-700 dark:text-slate-200">
-                    Backlinks (min – max)
-                  </span>
-                  <input
-                    type="text"
-                    placeholder="min - max"
-                    className="mt-1 w-full rounded border border-slate-300 px-2 py-1.5 font-mono text-sm dark:border-slate-600 dark:bg-slate-800"
-                    value={draft.backlinks}
-                    onChange={(e) =>
-                      setDraft((d) => ({ ...d, backlinks: e.target.value }))
-                    }
-                  />
-                </label>
-                <label className="block text-xs">
-                  <span className="font-medium text-slate-700 dark:text-slate-200">
-                    Payment terms
-                  </span>
-                  <select
-                    className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1.5 text-sm dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
-                    value={draft.paymentTerms}
-                    onChange={(e) =>
-                      setDraft((d) => ({
-                        ...d,
-                        paymentTerms: e.target.value as VendorFilters["paymentTerms"],
-                      }))
-                    }
-                  >
-                    <option value="">Any</option>
-                    <option value="ADVANCE">Advance</option>
-                    <option value="AFTER_LIVE_LINK">After live link</option>
-                  </select>
-                </label>
-                {scopeAllowsDealFilter ? (
-                  <label className="block text-xs">
-                    <span className="font-medium text-slate-700 dark:text-slate-200">
-                      Deal status
-                    </span>
-                    <select
-                      className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1.5 text-sm dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
-                      value={draft.dealStatus}
-                      onChange={(e) =>
-                        setDraft((d) => ({
-                          ...d,
-                          dealStatus: e.target.value as VendorFilters["dealStatus"],
-                        }))
-                      }
-                    >
-                      <option value="">Any</option>
-                      <option value="DEAL_DONE">Done</option>
-                      <option value="PENDING">Pending</option>
-                    </select>
-                  </label>
-                ) : null}
+                {VENDOR_EXTRA_ORDER.filter(({ key }) => activeVendorExtras.has(String(key)))
+                  .filter(({ key }) => key !== "dealStatus" || scopeAllowsDealFilter)
+                  .map(({ key, label }) => (
+                      <div
+                        key={key}
+                        className="group relative rounded-lg border border-slate-200/90 bg-white/70 p-2 pr-8 dark:border-slate-600 dark:bg-slate-900/40"
+                      >
+                        <button
+                          type="button"
+                          className={cn(
+                            "absolute right-1 top-1 rounded p-0.5 text-slate-500 transition hover:bg-slate-200 hover:text-slate-800 dark:hover:bg-slate-700 dark:hover:text-slate-100",
+                            vendorExtraFieldFilled(key)
+                              ? "opacity-100"
+                              : "opacity-0 group-hover:opacity-100",
+                          )}
+                          title="Remove filter"
+                          onClick={() => removeVendorExtra(key)}
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </button>
+                        {key === "ne" ? (
+                          <label className="block text-xs">
+                            <span className="font-medium text-slate-700 dark:text-slate-200">{label}</span>
+                            <input
+                              type="text"
+                              placeholder="min - max"
+                              className="mt-1 w-full rounded border border-slate-300 px-2 py-1.5 font-mono text-sm dark:border-slate-600 dark:bg-slate-800"
+                              value={draft.ne}
+                              onChange={(e) => setDraft((d) => ({ ...d, ne: e.target.value }))}
+                            />
+                          </label>
+                        ) : null}
+                        {key === "mozDa" ? (
+                          <label className="block text-xs">
+                            <span className="font-medium text-slate-700 dark:text-slate-200">{label}</span>
+                            <input
+                              type="text"
+                              placeholder="min - max"
+                              className="mt-1 w-full rounded border border-slate-300 px-2 py-1.5 font-mono text-sm dark:border-slate-600 dark:bg-slate-800"
+                              value={draft.mozDa}
+                              onChange={(e) => setDraft((d) => ({ ...d, mozDa: e.target.value }))}
+                            />
+                          </label>
+                        ) : null}
+                        {key === "as" ? (
+                          <label className="block text-xs">
+                            <span className="font-medium text-slate-700 dark:text-slate-200">{label}</span>
+                            <input
+                              type="text"
+                              placeholder="min - max"
+                              className="mt-1 w-full rounded border border-slate-300 px-2 py-1.5 font-mono text-sm dark:border-slate-600 dark:bg-slate-800"
+                              value={draft.as}
+                              onChange={(e) => setDraft((d) => ({ ...d, as: e.target.value }))}
+                            />
+                          </label>
+                        ) : null}
+                        {key === "tat" ? (
+                          <label className="block text-xs">
+                            <span className="font-medium text-slate-700 dark:text-slate-200">{label}</span>
+                            <input
+                              type="text"
+                              placeholder="min - max"
+                              className="mt-1 w-full rounded border border-slate-300 px-2 py-1.5 font-mono text-sm dark:border-slate-600 dark:bg-slate-800"
+                              value={draft.tat}
+                              onChange={(e) => setDraft((d) => ({ ...d, tat: e.target.value }))}
+                            />
+                          </label>
+                        ) : null}
+                        {key === "ref" ? (
+                          <label className="block text-xs">
+                            <span className="font-medium text-slate-700 dark:text-slate-200">{label}</span>
+                            <input
+                              type="text"
+                              placeholder="min - max"
+                              className="mt-1 w-full rounded border border-slate-300 px-2 py-1.5 font-mono text-sm dark:border-slate-600 dark:bg-slate-800"
+                              value={draft.ref}
+                              onChange={(e) => setDraft((d) => ({ ...d, ref: e.target.value }))}
+                            />
+                          </label>
+                        ) : null}
+                        {key === "backlinks" ? (
+                          <label className="block text-xs">
+                            <span className="font-medium text-slate-700 dark:text-slate-200">{label}</span>
+                            <input
+                              type="text"
+                              placeholder="min - max"
+                              className="mt-1 w-full rounded border border-slate-300 px-2 py-1.5 font-mono text-sm dark:border-slate-600 dark:bg-slate-800"
+                              value={draft.backlinks}
+                              onChange={(e) => setDraft((d) => ({ ...d, backlinks: e.target.value }))}
+                            />
+                          </label>
+                        ) : null}
+                        {key === "paymentTerms" ? (
+                          <label className="block text-xs">
+                            <span className="font-medium text-slate-700 dark:text-slate-200">{label}</span>
+                            <select
+                              className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1.5 text-sm dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
+                              value={draft.paymentTerms}
+                              onChange={(e) =>
+                                setDraft((d) => ({
+                                  ...d,
+                                  paymentTerms: e.target.value as VendorFilters["paymentTerms"],
+                                }))
+                              }
+                            >
+                              <option value="">Any</option>
+                              <option value="ADVANCE">Advance</option>
+                              <option value="AFTER_LIVE_LINK">After live link</option>
+                            </select>
+                          </label>
+                        ) : null}
+                        {key === "dealStatus" && scopeAllowsDealFilter ? (
+                          <label className="block text-xs">
+                            <span className="font-medium text-slate-700 dark:text-slate-200">{label}</span>
+                            <select
+                              className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1.5 text-sm dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
+                              value={draft.dealStatus}
+                              onChange={(e) =>
+                                setDraft((d) => ({
+                                  ...d,
+                                  dealStatus: e.target.value as VendorFilters["dealStatus"],
+                                }))
+                              }
+                            >
+                              <option value="">Any</option>
+                              <option value="DEAL_DONE">Done</option>
+                              <option value="PENDING">Pending</option>
+                            </select>
+                          </label>
+                        ) : null}
+                      </div>
+                  ))}
               </div>
-            )}
+            ) : null}
 
             <div className="mt-4 flex flex-wrap items-center gap-2">
               <button
                 type="button"
-                className="rounded-lg bg-brand-gradient px-4 py-1.5 text-sm font-semibold text-white dark:ring-1 dark:ring-cyan-500/30"
+                className="rounded-lg bg-blue-600 px-4 py-1.5 text-sm font-semibold text-white hover:bg-blue-700 dark:bg-blue-600 dark:hover:bg-blue-500"
                 onClick={() => {
                   applyFilters();
                   setFilterOpen(false);
+                  setExtraPickerOpen(false);
                 }}
               >
                 Apply filters
               </button>
-              <button
-                type="button"
-                className="text-sm text-brand-700 underline dark:text-cyan-400"
-                onClick={() => setMoreFilters((m) => !m)}
-              >
-                {moreFilters ? "Fewer filters" : "More filters"}
-              </button>
+              <div className="relative">
+                <button
+                  type="button"
+                  className="text-sm text-brand-700 underline dark:text-cyan-400"
+                  onClick={() => setExtraPickerOpen((o) => !o)}
+                >
+                  More filters
+                </button>
+                {extraPickerOpen ? (
+                  <>
+                    <button
+                      type="button"
+                      className="fixed inset-0 z-30 cursor-default"
+                      aria-label="Close"
+                      onClick={() => setExtraPickerOpen(false)}
+                    />
+                    <ul className="absolute left-0 top-full z-40 mt-1 max-h-56 min-w-[12rem] overflow-y-auto rounded-lg border border-slate-200 bg-white py-1 text-sm shadow-lg dark:border-slate-600 dark:bg-slate-800">
+                      {VENDOR_BASE_FILTER_KEYS.filter(({ key }) => !activeVendorBaseFilters.has(String(key))).map(
+                        ({ key, label }) => (
+                          <li key={`base-${String(key)}`}>
+                            <button
+                              type="button"
+                              className="block w-full px-3 py-2 text-left text-slate-800 hover:bg-slate-100 dark:text-slate-100 dark:hover:bg-slate-700"
+                              onClick={() => addVendorBaseFilter(key)}
+                            >
+                              {label}
+                            </button>
+                          </li>
+                        ),
+                      )}
+                      {VENDOR_EXTRA_ORDER.filter(({ key }) => !activeVendorExtras.has(String(key)))
+                        .filter(({ key }) => key !== "dealStatus" || scopeAllowsDealFilter)
+                        .map(({ key, label }) => (
+                          <li key={String(key)}>
+                            <button
+                              type="button"
+                              className="block w-full px-3 py-2 text-left text-slate-800 hover:bg-slate-100 dark:text-slate-100 dark:hover:bg-slate-700"
+                              onClick={() => addVendorExtra(key)}
+                            >
+                              {label}
+                            </button>
+                          </li>
+                        ))}
+                      {VENDOR_BASE_FILTER_KEYS.filter(({ key }) => !activeVendorBaseFilters.has(String(key)))
+                        .length === 0 &&
+                      VENDOR_EXTRA_ORDER.filter(({ key }) => !activeVendorExtras.has(String(key))).filter(
+                        ({ key }) => key !== "dealStatus" || scopeAllowsDealFilter,
+                      ).length === 0 ? (
+                        <li className="px-3 py-2 text-slate-500">All filters are shown</li>
+                      ) : null}
+                    </ul>
+                  </>
+                ) : null}
+              </div>
             </div>
               </>
             )}
@@ -935,60 +1139,60 @@ export function VendorTable({
           <button
             type="button"
             className="rounded-lg border border-red-200 bg-red-50 px-3 py-1.5 text-sm font-medium text-red-800 hover:bg-red-100"
-            onClick={() =>
-              setConfirmPermanent({ ids: [...selected], qty: selected.size })
-            }
+            onClick={() => {
+              const ids = [...selected];
+              void (async () => {
+                if (!ids.length) return;
+                if (!(await showConfirm(`Permanently delete ${ids.length} site(s)? This cannot be undone.`)))
+                  return;
+                await runPermanentDelete(ids);
+              })();
+            }}
           >
             Delete selected permanently
           </button>
         </div>
       )}
 
-      {pendingDelete && (
-        <div className="mt-4 flex items-center justify-between rounded-lg border border-amber-300 bg-amber-50 px-4 py-2 text-sm text-amber-900">
-          <span>Vendor will be moved to trash in a few seconds…</span>
-          <button
-            type="button"
-            className="font-medium underline"
-            onClick={cancelDelete}
-          >
+      {undoTrashBanner ? (
+        <div className="mt-4 flex items-center justify-between rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm text-emerald-950 dark:border-emerald-500/35 dark:bg-emerald-950/30 dark:text-emerald-100">
+          <span>Vendor moved to trash.</span>
+          <button type="button" className="font-medium underline" onClick={() => void restoreVendorFromUndo()}>
             Undo
           </button>
         </div>
-      )}
+      ) : null}
 
       {isLoading && <p className="mt-4">Loading…</p>}
 
-      <div className="mt-4 overflow-x-auto rounded-lg border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900">
-        <table className="min-w-full text-left text-sm">
-          <thead className="border-b border-slate-200 bg-slate-50 text-slate-600 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-300">
+      <div className="data-table-shell mt-4">
+        <table className="min-w-full text-center text-[11px]">
+          <thead className="data-table-thead">
             <tr>
-              <th className="p-2">
+              <th className="w-10 p-2.5 align-middle">
                 <input
                   type="checkbox"
+                  className="mx-auto block"
                   checked={
                     allIds.length > 0 && selected.size === allIds.length
                   }
                   onChange={toggleAll}
                 />
               </th>
-              <th className="p-2">Site URL</th>
-              {cols.niche ? <th className="p-2">Niche</th> : null}
-              {cols.country ? <th className="p-2">Country</th> : null}
-              {cols.language ? <th className="p-2">Language</th> : null}
-              {cols.traffic ? <th className="p-2">Traffic</th> : null}
-              {cols.dr ? <th className="p-2">DR</th> : null}
-              {cols.dealStatus ? (
-                <th className="p-2 text-xs font-semibold uppercase tracking-wide">
-                  Deal status
-                </th>
-              ) : null}
-              {cols.gpPrice ? <th className="p-2">Price</th> : null}
-              {cols.actions ? <th className="p-2">Actions</th> : null}
+              <th className="w-10 p-2.5">#</th>
+              <th className="min-w-[10rem] p-2.5">Site URL</th>
+              {cols.niche ? <th className="p-2.5">Niche</th> : null}
+              {cols.country ? <th className="p-2.5">Country</th> : null}
+              {cols.language ? <th className="p-2.5">Language</th> : null}
+              {cols.traffic ? <th className="p-2.5">Traffic</th> : null}
+              {cols.dr ? <th className="p-2.5">DR</th> : null}
+              {cols.dealStatus ? <th className="p-2.5">Deal status</th> : null}
+              {cols.gpPrice ? <th className="p-2.5">Price</th> : null}
+              {cols.actions ? <th className="p-2.5">Actions</th> : null}
             </tr>
           </thead>
           <tbody>
-            {rows.map((r) => {
+            {rows.map((r, rowIdx) => {
               const price =
                 typeof r.guestPostPrice === "object"
                   ? r.guestPostPrice.toString()
@@ -996,14 +1200,17 @@ export function VendorTable({
               const badge = r.completedOrderCount ?? 0;
               const badgeClass =
                 badge >= 10 ? "text-green-600" : "text-red-600";
+              const rowNum = (page - 1) * limit + rowIdx + 1;
+              const nicheWord = nicheFirstWord(r.niches[0]?.niche.label);
               return (
                 <tr
                   key={r.id}
-                  className="border-b border-slate-100 dark:border-slate-700"
+                  className="data-table-row"
                 >
-                  <td className="p-2 align-top">
+                  <td className="data-table-td">
                     <input
                       type="checkbox"
+                      className="mx-auto block"
                       checked={selected.has(r.id)}
                       onChange={() => {
                         const n = new Set(selected);
@@ -1013,90 +1220,106 @@ export function VendorTable({
                       }}
                     />
                   </td>
-                  <td className="p-2 align-top text-sm font-medium text-sky-700 dark:text-sky-400">
-                    <span className="mr-1.5 inline-flex min-w-[1rem] justify-center rounded bg-slate-100 px-0.5 text-[10px] font-bold leading-tight dark:bg-slate-800">
-                      <span className={badgeClass}>{badge}</span>
-                    </span>
-                    {r.siteUrl}
+                  <td className="data-table-td tabular-nums text-slate-500 dark:text-slate-400">
+                    {rowNum}
+                  </td>
+                  <td className="data-table-td max-w-[14rem]">
+                    <div className="mx-auto flex max-w-full min-w-0 items-center justify-center gap-1">
+                      <span className="inline-flex min-w-[1.1rem] shrink-0 justify-center rounded bg-slate-100 px-0.5 text-[10px] font-bold leading-tight dark:bg-slate-800">
+                        <span className={badgeClass}>{badge}</span>
+                      </span>
+                      <a
+                        href={r.siteUrl.startsWith("http") ? r.siteUrl : `https://${r.siteUrl}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="min-w-0 truncate text-[11px] font-medium text-sky-700 hover:underline dark:text-sky-400"
+                      >
+                        {r.siteUrl.replace(/^https?:\/\//, "")}
+                      </a>
+                      <a
+                        href={r.siteUrl.startsWith("http") ? r.siteUrl : `https://${r.siteUrl}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="shrink-0 text-slate-400 hover:text-sky-600 dark:hover:text-sky-400"
+                        aria-label="Open site"
+                      >
+                        <ExternalLink className="h-3 w-3" />
+                      </a>
+                    </div>
                   </td>
                   {cols.niche ? (
-                    <td
-                      className="max-w-[8rem] truncate p-2 align-top text-xs text-slate-700 dark:text-slate-300"
-                      title={r.niches.map((n) => n.niche.label).join(", ")}
-                    >
-                      {nicheFirstWord(r.niches[0]?.niche.label)}
+                    <td className="data-table-td max-w-[8rem]" title={r.niches.map((n) => n.niche.label).join(", ")}>
+                      <NicheTablePill text={nicheWord} />
                     </td>
                   ) : null}
                   {cols.country ? (
                     <td
-                      className="max-w-[7rem] truncate p-2 align-top text-xs text-slate-700 dark:text-slate-300"
-                      title={r.countries
-                        .map((c) => c.country.name)
-                        .join(", ")}
+                      className="data-table-td max-w-[7rem] truncate"
+                      title={r.countries.map((c) => c.country.name).join(", ")}
                     >
                       {countriesShortList(r.countries)}
                     </td>
                   ) : null}
                   {cols.language ? (
-                    <td className="max-w-[7rem] truncate p-2 align-top text-xs text-slate-700 dark:text-slate-300">
-                      {r.language.name}
-                    </td>
+                    <td className="data-table-td max-w-[7rem] truncate">{r.language.name}</td>
                   ) : null}
                   {cols.traffic ? (
-                    <td className="p-2 align-top text-xs tabular-nums text-slate-700 dark:text-slate-300">
-                      {r.traffic}
-                    </td>
+                    <td className="data-table-td tabular-nums">{r.traffic.toLocaleString()}</td>
                   ) : null}
                   {cols.dr ? (
-                    <td className="p-2 align-top text-xs tabular-nums text-slate-700 dark:text-slate-300">
-                      {r.dr}
+                    <td className="data-table-td">
+                      <DrTableMeter dr={r.dr} />
                     </td>
                   ) : null}
                   {cols.dealStatus ? (
-                    <td className="p-2 align-middle">
-                      <StatusPill
+                    <td className="data-table-td">
+                      <DealStatusTablePill
                         variant={r.dealStatus === "DEAL_DONE" ? "done" : "pending"}
                       >
                         {dealLabel(r.dealStatus)}
-                      </StatusPill>
+                      </DealStatusTablePill>
                     </td>
                   ) : null}
                   {cols.gpPrice ? (
-                    <td className="p-2 align-top text-xs tabular-nums text-slate-700 dark:text-slate-300">
+                    <td className="data-table-td tabular-nums">
                       {r.currency.symbol}
                       {price}
                     </td>
                   ) : null}
                   {cols.actions ? (
-                    <td className="whitespace-nowrap p-2 align-top text-xs">
-                      <div className="inline-flex flex-wrap items-center gap-x-3 gap-y-1">
+                    <td className="data-table-td whitespace-nowrap">
+                      <div className="inline-flex flex-nowrap items-center justify-center gap-1">
                         <Link
                           href={`/vendors/${r.id}`}
-                          className="text-sky-600 hover:underline dark:text-sky-400"
+                          className="inline-flex rounded p-1.5 text-slate-600 hover:bg-slate-100 hover:text-sky-600 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-sky-400"
+                          title="View"
                         >
-                          View
+                          <Eye className="h-4 w-4" />
                         </Link>
                         {scope !== "trash" ? (
                           <>
                             <Link
                               href={`/vendors/${r.id}/edit`}
-                              className="text-sky-600 hover:underline dark:text-sky-400"
+                              className="inline-flex rounded p-1.5 text-slate-600 hover:bg-slate-100 hover:text-sky-600 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-sky-400"
+                              title="Edit"
                             >
-                              Edit
+                              <Pencil className="h-4 w-4" />
                             </Link>
                             <button
                               type="button"
-                              className="text-red-600 hover:underline"
-                              onClick={() => scheduleDelete(r.id)}
+                              className="inline-flex rounded p-1.5 text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/40"
+                              title="Delete"
+                              onClick={() => void confirmSoftDeleteVendor(r.id)}
                             >
-                              Delete
+                              <Trash2 className="h-4 w-4" />
                             </button>
                           </>
                         ) : (
                           <>
                             <button
                               type="button"
-                              className="text-sky-600 hover:underline dark:text-sky-400"
+                              className="inline-flex rounded p-1.5 text-sky-600 hover:bg-slate-100 dark:text-sky-400 dark:hover:bg-slate-800"
+                              title="Restore"
                               onClick={async () => {
                                 await fetch(
                                   apiUrl(`/vendors/${r.id}/restore`),
@@ -1112,16 +1335,21 @@ export function VendorTable({
                                 });
                               }}
                             >
-                              Restore
+                              <RotateCcw className="h-4 w-4" />
                             </button>
                             <button
                               type="button"
-                              className="text-red-600 hover:underline"
+                              className="inline-flex rounded p-1.5 text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/40"
+                              title="Delete permanently"
                               onClick={() =>
-                                setConfirmPermanent({ ids: [r.id], qty: 1 })
+                                void (async () => {
+                                  if (!(await showConfirm("Permanently delete this vendor? This cannot be undone.")))
+                                    return;
+                                  await runPermanentDelete([r.id]);
+                                })()
                               }
                             >
-                              Delete
+                              <Trash2 className="h-4 w-4" />
                             </button>
                           </>
                         )}
@@ -1143,32 +1371,6 @@ export function VendorTable({
         onPageChange={setPage}
       />
 
-      {confirmPermanent && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="max-w-md rounded-xl bg-white p-6 shadow-2xl dark:bg-slate-900 dark:text-slate-100">
-            <p className="text-sm text-slate-800 dark:text-slate-200">
-              The app is permanently deleting {confirmPermanent.qty} site
-              {confirmPermanent.qty === 1 ? "" : "s"}. This cannot be undone.
-            </p>
-            <div className="mt-5 flex justify-end gap-2">
-              <button
-                type="button"
-                className="rounded-lg border border-slate-200 px-4 py-2 text-sm font-medium hover:bg-slate-50 dark:border-slate-600 dark:hover:bg-slate-800"
-                onClick={() => setConfirmPermanent(null)}
-              >
-                No
-              </button>
-              <button
-                type="button"
-                className="rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700"
-                onClick={() => void runPermanentDelete(confirmPermanent.ids)}
-              >
-                Yes
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
@@ -1212,7 +1414,7 @@ function BulkPriceButton({
       {open && (
         <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 p-4 dark:bg-black/60">
           <div
-            className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-600 dark:bg-slate-900"
+            className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-600 dark:bg-slate-800"
             role="dialog"
             aria-modal="true"
             aria-labelledby="bulk-price-title"

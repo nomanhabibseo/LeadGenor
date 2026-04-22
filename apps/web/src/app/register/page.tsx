@@ -5,6 +5,7 @@ import { signIn } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { BrandMark } from "@/components/brand-mark";
+import { PasswordField } from "@/components/password-field";
 import { apiUrl } from "@/lib/api";
 
 export default function RegisterPage() {
@@ -68,9 +69,9 @@ export default function RegisterPage() {
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-slate-950 px-4 dark:bg-brand-gradient">
+    <div className="flex min-h-screen items-center justify-center bg-slate-950 px-4 dark:bg-black">
       <div className="pointer-events-none fixed inset-0 bg-hero-mesh opacity-60 dark:opacity-40" aria-hidden />
-      <div className="relative w-full max-w-md rounded-2xl border border-white/10 bg-white/95 p-8 shadow-2xl backdrop-blur dark:border-slate-700/80 dark:bg-slate-900/95">
+      <div className="relative w-full max-w-md rounded-2xl border border-white/10 bg-white/95 p-8 shadow-2xl backdrop-blur dark:border-slate-700/80 dark:bg-slate-800/95">
         <Link href="/" className="mb-8 flex justify-center">
           <BrandMark variant="auth" priority />
         </Link>
@@ -100,13 +101,14 @@ export default function RegisterPage() {
           </label>
           <label className="block">
             <span className="form-label">Password (min 8)</span>
-            <input
-              type="password"
-              required
-              minLength={8}
+            <PasswordField
               value={password}
-              onChange={(e) => setPassword(e.target.value)}
+              onChange={setPassword}
               className="form-input"
+              minLength={8}
+              required
+              autoComplete="new-password"
+              aria-label="Password"
             />
           </label>
           {error && <p className="text-sm text-red-600">{error}</p>}

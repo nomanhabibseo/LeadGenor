@@ -4,15 +4,20 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { useSession } from "next-auth/react";
-import { ChevronDown, FileUp } from "lucide-react";
+import { ChevronDown, FileUp, Loader2 } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { PickerModal } from "@/components/picker-modal";
 import { ImportSpreadsheetModal } from "@/components/import-spreadsheet-modal";
+import { EmailTagsInput } from "@/components/email-tags-input";
+import { FormSectionCard } from "@/components/form-section-card";
+import { RefIdChipsField } from "@/components/ref-id-chips-field";
 import { useReference } from "@/hooks/use-reference";
 import { apiFetch, apiUrl } from "@/lib/api";
 import { isDuplicateUrlResponse } from "@/lib/duplicate-url-error";
 import { parseEmailsClient } from "@/lib/emails-input";
 import { normalizeSiteUrlInput } from "@/lib/site-url";
+import { StepperField } from "@/components/stepper-field";
+import { CLIENT_COUNTRY_MAX, CLIENT_NICHE_MAX } from "@/lib/vendor-client-form-limits";
 import { cn } from "@/lib/utils";
 
 const empty = {
@@ -22,12 +27,12 @@ const empty = {
   nicheIds: [] as string[],
   countryIds: [] as string[],
   languageId: "",
-  traffic: 0,
-  dr: 0,
-  mozDa: 0,
-  authorityScore: 0,
-  referringDomains: 0,
-  backlinks: 0,
+  traffic: null as number | null,
+  dr: null as number | null,
+  mozDa: null as number | null,
+  authorityScore: null as number | null,
+  referringDomains: null as number | null,
+  backlinks: null as number | null,
   email: "",
   whatsapp: "",
 };
@@ -64,6 +69,7 @@ export function ClientForm({ clientId }: { clientId?: string }) {
   const [importOpen, setImportOpen] = useState(false);
   const [sheetUrl, setSheetUrl] = useState("");
   const [importMsg, setImportMsg] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
 
   function clearFieldError(key: string) {
     setFieldErrors((prev) => {
@@ -146,20 +152,30 @@ export function ClientForm({ clientId }: { clientId?: string }) {
       return;
     }
     if (!validateFields()) return;
+    setSaving(true);
     const url = force && !clientId ? apiUrl("/clients/force") : apiUrl(clientId ? `/clients/${clientId}` : "/clients");
     const method = clientId ? "PUT" : "POST";
-    const res = await fetch(url, {
-      method,
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({
-        ...form,
-        siteUrl: normalizeSiteUrlInput(form.siteUrl),
-        whatsapp: form.whatsapp || undefined,
-      }),
-    });
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method,
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(
+          Object.fromEntries(
+            Object.entries({
+              ...form,
+              siteUrl: normalizeSiteUrlInput(form.siteUrl),
+              whatsapp: form.whatsapp || undefined,
+            }).filter(([, v]) => v !== null),
+          ),
+        ),
+      });
+    } finally {
+      setSaving(false);
+    }
     if (res.status === 400) {
       const j = (await res.json().catch(() => ({}))) as Record<string, unknown>;
       if (isDuplicateUrlResponse(j)) {
@@ -314,7 +330,7 @@ export function ClientForm({ clientId }: { clientId?: string }) {
           aria-modal="true"
           aria-labelledby="dup-client-title"
         >
-          <div className="max-w-md rounded-xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-600 dark:bg-slate-900">
+          <div className="max-w-md rounded-xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-600 dark:bg-slate-800">
             <h2 id="dup-client-title" className="text-base font-semibold text-slate-900 dark:text-slate-100">
               Duplicate site
             </h2>
@@ -372,7 +388,7 @@ export function ClientForm({ clientId }: { clientId?: string }) {
                   clearFieldError("nicheIds");
                   const set = new Set(form.nicheIds);
                   if (set.has(n.id)) set.delete(n.id);
-                  else if (set.size < 5) set.add(n.id);
+                  else if (set.size < CLIENT_NICHE_MAX) set.add(n.id);
                   setForm({ ...form, nicheIds: [...set] });
                 }}
               />
@@ -410,7 +426,7 @@ export function ClientForm({ clientId }: { clientId?: string }) {
                   clearFieldError("countryIds");
                   const set = new Set(form.countryIds);
                   if (set.has(c.id)) set.delete(c.id);
-                  else if (set.size < 3) set.add(c.id);
+                  else if (set.size < CLIENT_COUNTRY_MAX) set.add(c.id);
                   setForm({ ...form, countryIds: [...set] });
                 }}
               />
@@ -467,7 +483,7 @@ export function ClientForm({ clientId }: { clientId?: string }) {
                 setImportMsg(null);
                 setImportOpen(true);
               }}
-              className="inline-flex h-9 shrink-0 items-center justify-center gap-2 self-start rounded-lg border border-slate-200 bg-white px-4 text-sm font-medium text-slate-800 shadow-sm transition hover:bg-slate-50 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
+              className="btn-toolbar-outline shrink-0 self-start"
             >
               <FileUp className="h-4 w-4 text-brand-600 dark:text-cyan-400" />
               Import
@@ -477,98 +493,102 @@ export function ClientForm({ clientId }: { clientId?: string }) {
         </div>
       )}
 
-      <div className="space-y-5">
+      <div className="space-y-6">
         {saveError && (
           <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800">{saveError}</div>
         )}
 
-        <div className="grid gap-3 sm:grid-cols-2">
-          <label className="block">
-            <span className="form-label-sm">Company name</span>
-            <input
-              className={cn("form-input-body", fieldErrors.companyName && "form-input-body-invalid")}
-              value={form.companyName}
-              onChange={(e) => {
-                clearFieldError("companyName");
-                setForm({ ...form, companyName: e.target.value });
-              }}
-            />
-            {fieldErrors.companyName ? <p className="form-field-error">{fieldErrors.companyName}</p> : null}
-          </label>
-          <label className="block">
-            <span className="form-label-sm">Client name</span>
-            <input
-              className={cn("form-input-body", fieldErrors.clientName && "form-input-body-invalid")}
-              value={form.clientName}
-              onChange={(e) => {
-                clearFieldError("clientName");
-                setForm({ ...form, clientName: e.target.value });
-              }}
-            />
-            {fieldErrors.clientName ? <p className="form-field-error">{fieldErrors.clientName}</p> : null}
-          </label>
-        </div>
-
-        <label className="block">
-          <span className="form-label-sm">Site URL</span>
-          <input
-            className={cn("form-input-body", fieldErrors.siteUrl && "form-input-body-invalid")}
-            placeholder="https://example.com"
-            value={form.siteUrl}
-            onChange={(e) => {
-              clearFieldError("siteUrl");
-              setForm({ ...form, siteUrl: e.target.value });
-            }}
-            onBlur={(e) => setForm({ ...form, siteUrl: normalizeSiteUrlInput(e.target.value) })}
-          />
-          {fieldErrors.siteUrl ? <p className="form-field-error">{fieldErrors.siteUrl}</p> : null}
-        </label>
-
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-          <div>
-            <span className="form-label-sm">Niche</span>
-            <button
-              type="button"
-              onClick={() => {
-                clearFieldError("nicheIds");
-                setNicheOpen(true);
-              }}
-              className={cn("form-trigger-body", fieldErrors.nicheIds && "form-input-body-invalid")}
-            >
-              <span className={cn("truncate", form.nicheIds.length ? "text-slate-900 dark:text-slate-100" : "text-slate-400 dark:text-slate-300")}>
-                {form.nicheIds.length ? `${form.nicheIds.length} selected` : "Choose…"}
-              </span>
-              <ChevronDown className="h-4 w-4 shrink-0 text-slate-400 dark:text-slate-300" />
-            </button>
-            {fieldErrors.nicheIds ? <p className="form-field-error">{fieldErrors.nicheIds}</p> : null}
+        <FormSectionCard title="Basic information">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="block">
+              <span className="form-label-sm">Company name</span>
+              <input
+                className={cn("form-input-body", fieldErrors.companyName && "form-input-body-invalid")}
+                placeholder="e.g. Acme Inc."
+                value={form.companyName}
+                onChange={(e) => {
+                  clearFieldError("companyName");
+                  setForm({ ...form, companyName: e.target.value });
+                }}
+              />
+              {fieldErrors.companyName ? <p className="form-field-error">{fieldErrors.companyName}</p> : null}
+            </label>
+            <label className="block">
+              <span className="form-label-sm">Client name</span>
+              <input
+                className={cn("form-input-body", fieldErrors.clientName && "form-input-body-invalid")}
+                value={form.clientName}
+                onChange={(e) => {
+                  clearFieldError("clientName");
+                  setForm({ ...form, clientName: e.target.value });
+                }}
+              />
+              {fieldErrors.clientName ? <p className="form-field-error">{fieldErrors.clientName}</p> : null}
+            </label>
           </div>
+
+          <label className="block">
+            <span className="form-label-sm">
+              Site URL <span className="text-red-500">*</span>
+            </span>
+            <input
+              className={cn("form-input-body", fieldErrors.siteUrl && "form-input-body-invalid")}
+              placeholder="https://example.com"
+              value={form.siteUrl}
+              onChange={(e) => {
+                clearFieldError("siteUrl");
+                setForm({ ...form, siteUrl: e.target.value });
+              }}
+              onBlur={(e) => setForm({ ...form, siteUrl: normalizeSiteUrlInput(e.target.value) })}
+            />
+            {fieldErrors.siteUrl ? <p className="form-field-error">{fieldErrors.siteUrl}</p> : null}
+          </label>
+
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <RefIdChipsField
+            label="Niche"
+            required
+            ids={form.nicheIds}
+            max={CLIENT_NICHE_MAX}
+            options={(ref.niches ?? []).map((n) => ({ id: n.id, label: n.label }))}
+            onChange={(nicheIds) => {
+              clearFieldError("nicheIds");
+              setForm({ ...form, nicheIds });
+            }}
+            onOpenPicker={() => {
+              clearFieldError("nicheIds");
+              setNicheOpen(true);
+            }}
+            error={fieldErrors.nicheIds}
+          />
+          <RefIdChipsField
+            label="Country"
+            required
+            ids={form.countryIds}
+            max={CLIENT_COUNTRY_MAX}
+            options={(ref.countries ?? []).map((c) => ({ id: c.id, label: `${c.code} — ${c.name}` }))}
+            onChange={(countryIds) => {
+              clearFieldError("countryIds");
+              setForm({ ...form, countryIds });
+            }}
+            onOpenPicker={() => {
+              clearFieldError("countryIds");
+              setCountryOpen(true);
+            }}
+            error={fieldErrors.countryIds}
+          />
           <label className="block">
             <span className="form-label-sm">Traffic</span>
-            <input
-              type="number"
-              min={0}
-              className="form-input-body"
-              value={form.traffic}
-              onChange={(e) => setForm({ ...form, traffic: Number(e.target.value) || 0 })}
-            />
+            <div className="mt-1">
+              <StepperField
+                mode="int"
+                min={0}
+                aria-label="Traffic"
+                value={form.traffic}
+                onChange={(v) => setForm({ ...form, traffic: v })}
+              />
+            </div>
           </label>
-          <div>
-            <span className="form-label-sm">Country</span>
-            <button
-              type="button"
-              onClick={() => {
-                clearFieldError("countryIds");
-                setCountryOpen(true);
-              }}
-              className={cn("form-trigger-body", fieldErrors.countryIds && "form-input-body-invalid")}
-            >
-              <span className={cn("truncate", form.countryIds.length ? "text-slate-900 dark:text-slate-100" : "text-slate-400 dark:text-slate-300")}>
-                {form.countryIds.length ? `${form.countryIds.length} selected` : "Choose…"}
-              </span>
-              <ChevronDown className="h-4 w-4 shrink-0 text-slate-400 dark:text-slate-300" />
-            </button>
-            {fieldErrors.countryIds ? <p className="form-field-error">{fieldErrors.countryIds}</p> : null}
-          </div>
           <div>
             <span className="form-label-sm">Language</span>
             <button
@@ -587,7 +607,9 @@ export function ClientForm({ clientId }: { clientId?: string }) {
             {fieldErrors.languageId ? <p className="form-field-error">{fieldErrors.languageId}</p> : null}
           </div>
         </div>
+        </FormSectionCard>
 
+        <FormSectionCard title="SEO metrics">
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {(
             [
@@ -600,29 +622,35 @@ export function ClientForm({ clientId }: { clientId?: string }) {
           ).map(([k, label]) => (
             <label key={k} className="block">
               <span className="form-label-sm">{label}</span>
-              <input
-                type="number"
-                min={0}
-                max={k === "dr" || k === "mozDa" || k === "authorityScore" ? 100 : undefined}
-                className="form-input-body"
-                value={form[k]}
-                onChange={(e) => setForm({ ...form, [k]: Number(e.target.value) || 0 })}
-              />
+              <div className="mt-1">
+                <StepperField
+                  mode="int"
+                  min={0}
+                  max={k === "dr" || k === "mozDa" || k === "authorityScore" ? 100 : undefined}
+                  aria-label={label}
+                  value={form[k]}
+                  onChange={(v) => setForm({ ...form, [k]: v })}
+                />
+              </div>
             </label>
           ))}
         </div>
+        </FormSectionCard>
 
+        <FormSectionCard title="Contact">
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="block">
-            <span className="form-label-sm">Email</span>
-            <textarea
-              className={cn("form-input-body min-h-[72px] resize-y", fieldErrors.email && "form-input-body-invalid")}
-              rows={3}
-              placeholder="One or more emails, separated by comma, semicolon, or newline"
+            <span className="form-label-sm">
+              Email <span className="text-red-500">*</span>
+            </span>
+            <EmailTagsInput
+              className="mt-1"
               value={form.email}
-              onChange={(e) => {
+              invalid={!!fieldErrors.email}
+              aria-invalid={fieldErrors.email ? "true" : undefined}
+              onChange={(email) => {
                 clearFieldError("email");
-                setForm({ ...form, email: e.target.value });
+                setForm({ ...form, email });
               }}
             />
             {fieldErrors.email ? <p className="form-field-error">{fieldErrors.email}</p> : null}
@@ -637,14 +665,17 @@ export function ClientForm({ clientId }: { clientId?: string }) {
             />
           </label>
         </div>
+        </FormSectionCard>
 
         <div className="mt-2">
           <button
             type="button"
-            className="btn-save-primary"
+            className="btn-save-primary inline-flex items-center gap-2"
+            disabled={saving}
             onClick={() => void save()}
           >
-            Save client
+            {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+            {clientId ? "Save changes" : "Save client"}
           </button>
         </div>
       </div>

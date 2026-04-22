@@ -4,9 +4,12 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { useSession } from "next-auth/react";
+import { Loader2 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { apiFetch, apiUrl } from "@/lib/api";
 import { normalizeSiteUrlInput, siteUrlsEqual } from "@/lib/site-url";
+import { FormSectionCard } from "@/components/form-section-card";
+import { StepperField } from "@/components/stepper-field";
 import { cn } from "@/lib/utils";
 import { useReference } from "@/hooks/use-reference";
 
@@ -42,8 +45,10 @@ export function OrderForm({ orderId }: { orderId?: string }) {
     clientId: "",
     vendorId: "",
     linkType: "GUEST_POST" as "GUEST_POST" | "NICHE_EDIT",
+    seoLinkAttribute: "DO_FOLLOW" as "DO_FOLLOW" | "NO_FOLLOW" | "SPONSORED",
+    seoLinkQuantity: 1,
     articleWriting: false,
-    articleWritingFeeUsd: 0,
+    articleWritingFeeUsd: null as number | null,
     paymentTerms: "ADVANCE" as "ADVANCE" | "AFTER_LIVE_LINK",
     deliveryDays: 7,
     status: "PENDING" as "COMPLETED" | "PENDING",
@@ -59,6 +64,7 @@ export function OrderForm({ orderId }: { orderId?: string }) {
 
   const [saveError, setSaveError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState(false);
 
   const resolvedClientId = useMemo(() => {
     const t = clientSiteInput.trim();
@@ -76,7 +82,9 @@ export function OrderForm({ orderId }: { orderId?: string }) {
 
   const effectiveVendorId = resolvedVendorId || form.vendorId;
   const articleFeeForPreview =
-    form.articleWriting && form.articleWritingFeeUsd > 0 ? form.articleWritingFeeUsd : 0;
+    form.articleWriting && form.articleWritingFeeUsd != null && form.articleWritingFeeUsd > 0
+      ? form.articleWritingFeeUsd
+      : 0;
 
   const { data: preview } = useQuery({
     queryKey: [
@@ -126,8 +134,16 @@ export function OrderForm({ orderId }: { orderId?: string }) {
         clientId: String(o.clientId),
         vendorId: String(o.vendorId),
         linkType: o.linkType as "GUEST_POST" | "NICHE_EDIT",
+        seoLinkAttribute:
+          (o.seoLinkAttribute as "DO_FOLLOW" | "NO_FOLLOW" | "SPONSORED") || "DO_FOLLOW",
+        seoLinkQuantity: Math.max(1, Number(o.seoLinkQuantity ?? 1)),
         articleWriting: Boolean(o.articleWriting),
-        articleWritingFeeUsd: Number(o.articleWritingFeeUsd ?? 0),
+        articleWritingFeeUsd: (() => {
+          const aw = Boolean(o.articleWriting);
+          const fee = Number(o.articleWritingFeeUsd ?? 0);
+          if (!aw) return null;
+          return fee > 0 ? fee : null;
+        })(),
         paymentTerms: o.paymentTerms as "ADVANCE" | "AFTER_LIVE_LINK",
         deliveryDays: Number(o.deliveryDays),
         status: o.status as "COMPLETED" | "PENDING",
@@ -177,7 +193,10 @@ export function OrderForm({ orderId }: { orderId?: string }) {
     const e: Record<string, string> = {};
     if (!clientId) e.clientId = "Enter or choose a client site URL that exists in your list.";
     if (!vendorId) e.vendorId = "Enter or choose a vendor site URL that exists in your list.";
-    if (form.articleWriting && (!form.articleWritingFeeUsd || form.articleWritingFeeUsd <= 0)) {
+    if (
+      form.articleWriting &&
+      (form.articleWritingFeeUsd == null || form.articleWritingFeeUsd <= 0)
+    ) {
       e.articleWritingFeeUsd = "Enter a fee greater than 0.";
     }
     setFieldErrors(e);
@@ -193,40 +212,52 @@ export function OrderForm({ orderId }: { orderId?: string }) {
     const cid = resolvedClientId || form.clientId;
     const vid = resolvedVendorId || form.vendorId;
     if (!validateFields(cid, vid)) return;
-    const path = orderId ? `/orders/${orderId}` : "/orders";
-    const method = orderId ? "PUT" : "POST";
-    const paymentMethodNote = buildPaymentNote() || undefined;
-    const res = await fetch(apiUrl(path), {
-      method,
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({
-        ...form,
-        clientId: cid,
-        vendorId: vid,
-        articleWritingFeeUsd: form.articleWriting ? form.articleWritingFeeUsd : undefined,
-        paymentMethodNote,
-      }),
-    });
-    if (!res.ok) {
-      const text = await res.text();
-      let msg = text || "Save failed";
-      try {
-        const j = JSON.parse(text) as { message?: unknown };
-        if (typeof j.message === "string") msg = j.message;
-        else if (Array.isArray(j.message)) msg = JSON.stringify(j.message);
-      } catch {
-        /* keep msg */
+    setSaving(true);
+    try {
+      const path = orderId ? `/orders/${orderId}` : "/orders";
+      const method = orderId ? "PUT" : "POST";
+      const paymentMethodNote = buildPaymentNote() || undefined;
+      const res = await fetch(apiUrl(path), {
+        method,
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          ...form,
+          clientId: cid,
+          vendorId: vid,
+          seoLinkQuantity: Math.max(1, form.seoLinkQuantity),
+          articleWritingFeeUsd: form.articleWriting ? (form.articleWritingFeeUsd ?? undefined) : undefined,
+          paymentMethodNote,
+        }),
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        let msg = text || "Save failed";
+        try {
+          const j = JSON.parse(text) as { message?: unknown };
+          if (typeof j.message === "string") msg = j.message;
+          else if (Array.isArray(j.message)) msg = JSON.stringify(j.message);
+        } catch {
+          /* keep msg */
+        }
+        setSaveError(msg);
+        return;
       }
-      setSaveError(msg);
-      return;
+      const body = (await res.json()) as { id: string };
+      const id = body.id ?? orderId;
+      if (orderId) {
+        router.push("/orders");
+      } else if (id) {
+        router.push(`/orders/${id}`);
+      } else {
+        router.push("/orders");
+      }
+      router.refresh();
+    } finally {
+      setSaving(false);
     }
-    const body = (await res.json()) as { id: string };
-    const id = body.id ?? orderId;
-    if (id) router.push(`/orders/${id}`);
-    router.refresh();
   }
 
   if (sessionStatus === "loading") {
@@ -270,13 +301,14 @@ export function OrderForm({ orderId }: { orderId?: string }) {
         </div>
       )}
 
-      <div className="space-y-5">
+      <div className="space-y-6">
         {saveError && (
           <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200">
             {saveError}
           </div>
         )}
 
+        <FormSectionCard title="Client & vendor">
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="block">
             <span className="form-label-sm">Client site URL</span>
@@ -345,10 +377,12 @@ export function OrderForm({ orderId }: { orderId?: string }) {
             <p className="mt-1 text-xs text-slate-500">Type a URL or choose from your saved vendors.</p>
           </label>
         </div>
+        </FormSectionCard>
 
+        <FormSectionCard title="Placement & link type">
         <div className="flex flex-col gap-4 lg:flex-row lg:flex-wrap lg:items-end">
           <label className="block min-w-[160px] max-w-xs flex-1">
-            <span className="form-label-sm">Link type</span>
+            <span className="form-label-sm">Placement type</span>
             <select
               className="form-input-body"
               value={form.linkType}
@@ -369,19 +403,21 @@ export function OrderForm({ orderId }: { orderId?: string }) {
               Article writing
             </label>
             {form.articleWriting ? (
-              <label className="block max-w-[200px]">
+              <label className="block max-w-[220px]">
                 <span className="form-label-sm">Article writing fee (USD)</span>
-                <input
-                  type="number"
-                  min={0}
-                  step="0.01"
-                  className={cn("form-input-body", fieldErrors.articleWritingFeeUsd && "form-input-body-invalid")}
-                  value={form.articleWritingFeeUsd || ""}
-                  onChange={(e) => {
-                    clearFieldError("articleWritingFeeUsd");
-                    setForm({ ...form, articleWritingFeeUsd: Number(e.target.value) });
-                  }}
-                />
+                <div className={cn("mt-1", fieldErrors.articleWritingFeeUsd && "rounded-lg ring-2 ring-red-300")}>
+                  <StepperField
+                    mode="decimal"
+                    min={0}
+                    prefix={preview?.currency?.symbol ?? "$"}
+                    aria-label="Article writing fee USD"
+                    value={form.articleWritingFeeUsd}
+                    onChange={(v) => {
+                      clearFieldError("articleWritingFeeUsd");
+                      setForm({ ...form, articleWritingFeeUsd: v });
+                    }}
+                  />
+                </div>
                 {fieldErrors.articleWritingFeeUsd ? (
                   <p className="form-field-error">{fieldErrors.articleWritingFeeUsd}</p>
                 ) : null}
@@ -390,16 +426,61 @@ export function OrderForm({ orderId }: { orderId?: string }) {
           </div>
         </div>
 
+        <div>
+          <span className="form-label-sm">Link type (quantity + attribute)</span>
+          <div className="mt-1 flex w-full max-w-md overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm ring-1 ring-slate-200/40 transition-colors hover:border-sky-500 focus-within:border-sky-500 focus-within:ring-2 focus-within:ring-sky-500/20 dark:border-slate-600 dark:bg-slate-800/75 dark:ring-slate-700/50 dark:hover:border-sky-400 dark:focus-within:border-sky-400 dark:focus-within:ring-sky-500/25">
+            <StepperField
+              embedded
+              mode="int"
+              min={0}
+              aria-label="Link quantity"
+              className="w-24 shrink-0 sm:w-28"
+              value={form.seoLinkQuantity}
+              onChange={(v) =>
+                setForm({
+                  ...form,
+                  seoLinkQuantity: v == null ? 1 : Math.max(1, v),
+                })
+              }
+              onBlur={() =>
+                setForm((f) => ({
+                  ...f,
+                  seoLinkQuantity: f.seoLinkQuantity < 1 ? 1 : f.seoLinkQuantity,
+                }))
+              }
+            />
+            <select
+              className="min-w-0 flex-1 border-0 bg-white px-2 py-2 text-sm font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-sky-500/30 dark:bg-transparent dark:text-slate-100"
+              value={form.seoLinkAttribute}
+              onChange={(e) =>
+                setForm({
+                  ...form,
+                  seoLinkAttribute: e.target.value as typeof form.seoLinkAttribute,
+                })
+              }
+            >
+              <option value="DO_FOLLOW">Do-follow</option>
+              <option value="NO_FOLLOW">No-follow</option>
+              <option value="SPONSORED">Sponsored</option>
+            </select>
+          </div>
+        </div>
+        </FormSectionCard>
+
+        <FormSectionCard title="Payment & delivery">
         <div className="grid gap-3 lg:grid-cols-4">
-          <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 dark:border-slate-600 dark:bg-slate-800/50">
+          <div className="block">
             <span className="form-label-sm">Total payment</span>
-            <p className="mt-1 text-lg font-semibold tabular-nums text-slate-900 dark:text-slate-100">
-              {preview
-                ? `${preview.currency.symbol}${preview.totalPayment}`
-                : effectiveVendorId
-                  ? "—"
-                  : "Pick a vendor"}
-            </p>
+            <div
+              className="form-input-body mt-1 flex h-10 items-center tabular-nums text-sm font-semibold text-slate-900 dark:text-slate-100"
+              aria-readonly="true"
+            >
+              {!effectiveVendorId
+                ? "$0"
+                : preview
+                  ? `${preview.currency.symbol}${preview.totalPayment}`
+                  : "—"}
+            </div>
           </div>
           <label className="block">
             <span className="form-label-sm">Payment method</span>
@@ -476,10 +557,17 @@ export function OrderForm({ orderId }: { orderId?: string }) {
             />
           </label>
         </div>
+        </FormSectionCard>
 
         <div className="mt-2">
-          <button type="button" className="btn-save-primary" onClick={() => void save()}>
-            Save order
+          <button
+            type="button"
+            className="btn-save-primary inline-flex items-center gap-2"
+            disabled={saving}
+            onClick={() => void save()}
+          >
+            {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+            {orderId ? "Save changes" : "Save order"}
           </button>
         </div>
       </div>

@@ -3,15 +3,30 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { SessionProvider } from "next-auth/react";
 import { useState } from "react";
+import { AppDialogProvider } from "@/contexts/app-dialog-context";
 import { ThemeProvider } from "@/components/theme-provider";
 
 export function Providers({ children }: { children: React.ReactNode }) {
-  const [client] = useState(() => new QueryClient());
+  const [client] = useState(
+    () =>
+      new QueryClient({
+        defaultOptions: {
+          queries: {
+            staleTime: 0,
+            gcTime: 1000 * 60 * 30,
+            refetchOnWindowFocus: true,
+            retry: 1,
+          },
+        },
+      }),
+  );
   return (
-    <SessionProvider>
-      <ThemeProvider>
-        <QueryClientProvider client={client}>{children}</QueryClientProvider>
-      </ThemeProvider>
+    <SessionProvider refetchOnWindowFocus>
+      <QueryClientProvider client={client}>
+        <ThemeProvider>
+          <AppDialogProvider>{children}</AppDialogProvider>
+        </ThemeProvider>
+      </QueryClientProvider>
     </SessionProvider>
   );
 }

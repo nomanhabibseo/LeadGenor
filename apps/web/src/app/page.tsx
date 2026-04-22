@@ -4,7 +4,7 @@ import { ArrowRight, LayoutDashboard, Sparkles } from "lucide-react";
 
 export default function HomePage() {
   return (
-    <div className="min-h-screen bg-slate-950 text-white">
+    <div className="min-h-screen bg-slate-950 text-white dark:bg-black">
       <div className="pointer-events-none fixed inset-0 bg-hero-mesh opacity-90" aria-hidden />
       <header className="relative z-10 border-b border-white/10 bg-slate-950/80 backdrop-blur-md">
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-4 py-5 md:py-6">

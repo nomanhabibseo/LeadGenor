@@ -29,12 +29,29 @@ async function main() {
     });
   }
 
+  /** Drop catalog rows not in the current seed (join rows cascade). */
+  const nicheSlugs = SEED_NICHES.map((n) => n.slug);
+  const removedNiches = await prisma.niche.deleteMany({
+    where: { slug: { notIn: nicheSlugs } },
+  });
+  if (removedNiches.count > 0) {
+    console.log(`Removed ${removedNiches.count} niche(s) not in seed-niches.ts`);
+  }
+
   for (const c of SEED_COUNTRIES) {
     await prisma.country.upsert({
       where: { code: c.code },
       update: { name: c.name, sortOrder: c.sortOrder },
       create: { code: c.code, name: c.name, sortOrder: c.sortOrder },
     });
+  }
+
+  const countryCodes = SEED_COUNTRIES.map((c) => c.code);
+  const removedCountries = await prisma.country.deleteMany({
+    where: { code: { notIn: countryCodes } },
+  });
+  if (removedCountries.count > 0) {
+    console.log(`Removed ${removedCountries.count} country/countries not in seed-countries.ts`);
   }
 
   for (const l of SEED_LANGUAGES) {

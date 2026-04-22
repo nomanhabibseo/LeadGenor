@@ -65,6 +65,8 @@ export const authOptions: NextAuthOptions = {
         (session as { accessToken?: string }).accessToken = token.accessToken as string;
         session.user.name = (token.name as string) ?? "";
         if (token.email) session.user.email = token.email as string;
+        /** Stable id for React Query keys + server `sub` (same as Nest JWT subject). */
+        if (token.sub) session.user.id = token.sub;
       }
       return session;
     },

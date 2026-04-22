@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import { DealStatus, OrderStatus, PaymentTerms, Prisma, TatUnit } from '@prisma/client';
+import { DealStatus, OrderStatus, PaymentTerms, Prisma, SeoLinkAttribute, TatUnit } from '@prisma/client';
 import { normalizeSiteUrl } from '@leadgenor/shared';
 import { joinEmails, parseEmails } from '../common/multi-email';
 import { PrismaService } from '../prisma/prisma.service';
@@ -24,6 +24,8 @@ type NormalizedVendorBody = {
   referringDomains: number;
   backlinks: number;
   trustFlow: number;
+  seoLinkAttribute: SeoLinkAttribute;
+  seoLinkQuantity: number;
   tatUnit: TatUnit;
   tatValue: number;
   currencyId: string;
@@ -123,6 +125,8 @@ export class VendorsService {
       referringDomains: dto.referringDomains ?? 0,
       backlinks: dto.backlinks ?? 0,
       trustFlow: dto.trustFlow ?? 0,
+      seoLinkAttribute: dto.seoLinkAttribute ?? SeoLinkAttribute.DO_FOLLOW,
+      seoLinkQuantity: dto.seoLinkQuantity != null && dto.seoLinkQuantity > 0 ? dto.seoLinkQuantity : 1,
       tatUnit: dto.tatUnit ?? TatUnit.DAYS,
       tatValue: dto.tatValue ?? 0,
       currencyId,
@@ -160,6 +164,8 @@ export class VendorsService {
         referringDomains: n.referringDomains,
         backlinks: n.backlinks,
         trustFlow: n.trustFlow,
+        seoLinkAttribute: n.seoLinkAttribute,
+        seoLinkQuantity: n.seoLinkQuantity,
         tatUnit: n.tatUnit,
         tatValue: n.tatValue,
         currencyId: n.currencyId,
@@ -199,6 +205,8 @@ export class VendorsService {
         referringDomains: n.referringDomains,
         backlinks: n.backlinks,
         trustFlow: n.trustFlow,
+        seoLinkAttribute: n.seoLinkAttribute,
+        seoLinkQuantity: n.seoLinkQuantity,
         tatUnit: n.tatUnit,
         tatValue: n.tatValue,
         currencyId: n.currencyId,
@@ -245,6 +253,8 @@ export class VendorsService {
         referringDomains: n.referringDomains,
         backlinks: n.backlinks,
         trustFlow: n.trustFlow,
+        seoLinkAttribute: n.seoLinkAttribute,
+        seoLinkQuantity: n.seoLinkQuantity,
         tatUnit: n.tatUnit,
         tatValue: n.tatValue,
         currencyId: n.currencyId,

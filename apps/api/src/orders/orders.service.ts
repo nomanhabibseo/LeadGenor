@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import { LinkType, OrderStatus, Prisma } from '@prisma/client';
+import { LinkType, OrderStatus, Prisma, SeoLinkAttribute } from '@prisma/client';
 import { normalizeSiteUrl } from '@leadgenor/shared';
 import { joinEmails, parseEmails } from '../common/multi-email';
 import { PrismaService } from '../prisma/prisma.service';
@@ -55,12 +55,17 @@ export class OrdersService {
     if (!emails.length) throw new BadRequestException('At least one valid client email is required.');
     const email = joinEmails(emails);
 
+    const seoAttr = dto.seoLinkAttribute ?? SeoLinkAttribute.DO_FOLLOW;
+    const seoQty = dto.seoLinkQuantity != null && dto.seoLinkQuantity > 0 ? dto.seoLinkQuantity : 1;
+
     return this.prisma.order.create({
       data: {
         userId,
         clientId: dto.clientId,
         vendorId: dto.vendorId,
         linkType: dto.linkType,
+        seoLinkAttribute: seoAttr,
+        seoLinkQuantity: seoQty,
         resellerPrice,
         vendorCost,
         articleWriting: dto.articleWriting,
@@ -113,12 +118,17 @@ export class OrdersService {
     if (!emails.length) throw new BadRequestException('At least one valid client email is required.');
     const email = joinEmails(emails);
 
+    const seoAttr = dto.seoLinkAttribute ?? SeoLinkAttribute.DO_FOLLOW;
+    const seoQty = dto.seoLinkQuantity != null && dto.seoLinkQuantity > 0 ? dto.seoLinkQuantity : 1;
+
     return this.prisma.order.update({
       where: { id },
       data: {
         clientId: dto.clientId,
         vendorId: dto.vendorId,
         linkType: dto.linkType,
+        seoLinkAttribute: seoAttr,
+        seoLinkQuantity: seoQty,
         resellerPrice,
         vendorCost,
         articleWriting: dto.articleWriting,

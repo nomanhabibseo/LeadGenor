@@ -14,7 +14,7 @@ import {
   Min,
   ValidateIf,
 } from 'class-validator';
-import { DealStatus, PaymentTerms, TatUnit } from '@prisma/client';
+import { DealStatus, PaymentTerms, SeoLinkAttribute, TatUnit } from '@prisma/client';
 
 /** Required: siteUrl, nicheIds, countryIds, contactEmail (one or more); rest optional (defaults in service). */
 export class VendorBodyDto {
@@ -86,6 +86,16 @@ export class VendorBodyDto {
   @Min(0)
   @Type(() => Number)
   trustFlow?: number;
+
+  @IsOptional()
+  @IsEnum(SeoLinkAttribute)
+  seoLinkAttribute?: SeoLinkAttribute;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Type(() => Number)
+  seoLinkQuantity?: number;
 
   @IsOptional()
   @IsEnum(TatUnit)

@@ -15,10 +15,12 @@ import { StatsModule } from './stats/stats.module';
 import { UsersModule } from './users/users.module';
 import { VendorsModule } from './vendors/vendors.module';
 import { HealthModule } from './health/health.module';
+import { EmailMarketingModule } from './email-marketing/email-marketing.module';
 
 @Module({
   imports: [
     HealthModule,
+    EmailMarketingModule,
     ConfigModule.forRoot({
       isGlobal: true,
       // Monorepo: load repo root `.env` first (DATABASE_URL, PORT), then `apps/api/.env` if present.

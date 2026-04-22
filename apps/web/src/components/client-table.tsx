@@ -3,8 +3,21 @@
 import Link from "next/link";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSession } from "next-auth/react";
-import { useCallback, useMemo, useState } from "react";
-import { ChevronDown, FileUp, Filter, LayoutGrid, Plus } from "lucide-react";
+import { useCallback, useMemo, useRef, useState } from "react";
+import {
+  ChevronDown,
+  ExternalLink,
+  Eye,
+  FileUp,
+  Filter,
+  LayoutGrid,
+  Pencil,
+  Plus,
+  RotateCcw,
+  Trash2,
+  X,
+} from "lucide-react";
+import { useAppDialog } from "@/contexts/app-dialog-context";
 import { apiFetch, apiUrl } from "@/lib/api";
 import { ExportFormatMenu, type ExportChunk } from "@/components/export-format-menu";
 import { ImportSpreadsheetModal } from "@/components/import-spreadsheet-modal";
@@ -16,6 +29,7 @@ import {
   countriesShortList,
   nicheFirstWord,
 } from "@/lib/vendor-table-display";
+import { DrTableMeter, NicheTablePill } from "@/components/table-status-badges";
 
 const PAGE_SIZE = 100;
 
@@ -31,6 +45,13 @@ type Row = {
   completedOrderCount?: number;
 };
 
+type ClientListPayload = {
+  data: Row[];
+  total: number;
+  page: number;
+  limit: number;
+};
+
 type ClientFilters = {
   nicheId: string;
   countryId: string;
@@ -43,6 +64,21 @@ type ClientFilters = {
   backlinks: string;
 };
 
+const CLIENT_EXTRA_ORDER: { key: keyof ClientFilters; label: string }[] = [
+  { key: "mozDa", label: "Moz DA (min – max)" },
+  { key: "as", label: "Authority score (min – max)" },
+  { key: "ref", label: "Ref. domains (min – max)" },
+  { key: "backlinks", label: "Backlinks (min – max)" },
+];
+
+const CLIENT_BASE_FILTER_KEYS: { key: keyof ClientFilters; label: string }[] = [
+  { key: "nicheId", label: "Niche" },
+  { key: "countryId", label: "Country" },
+  { key: "languageId", label: "Language" },
+  { key: "traffic", label: "Traffic (min – max)" },
+  { key: "dr", label: "DR (min – max)" },
+];
+
 const emptyFilters = (): ClientFilters => ({
   nicheId: "",
   countryId: "",
@@ -54,6 +90,11 @@ const emptyFilters = (): ClientFilters => ({
   ref: "",
   backlinks: "",
 });
+
+function siteHref(u: string) {
+  const t = u.trim();
+  return t.startsWith("http") ? t : `https://${t}`;
+}
 
 function buildClientListUrl(
   scopeParam: string,
@@ -88,17 +129,20 @@ export function ClientTable({
   const { data: session } = useSession();
   const token = session?.accessToken;
   const qc = useQueryClient();
+  const { showAlert, showConfirm } = useAppDialog();
   const { data: ref, isLoading: refLoading } = useReference();
   const [searchUrl, setSearchUrl] = useState("");
   const [page, setPage] = useState(1);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [confirmPermanent, setConfirmPermanent] = useState<{
-    ids: string[];
-    qty: number;
-  } | null>(null);
+  const undoBannerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [undoTrashBanner, setUndoTrashBanner] = useState<{ id: string } | null>(null);
 
   const [filterOpen, setFilterOpen] = useState(false);
-  const [moreFilters, setMoreFilters] = useState(false);
+  const [activeClientExtras, setActiveClientExtras] = useState<Set<string>>(() => new Set());
+  const [activeClientBaseFilters, setActiveClientBaseFilters] = useState<Set<string>>(
+    () => new Set(CLIENT_BASE_FILTER_KEYS.map((x) => String(x.key))),
+  );
+  const [clientExtraPickerOpen, setClientExtraPickerOpen] = useState(false);
   const [draft, setDraft] = useState<ClientFilters>(emptyFilters);
   const [applied, setApplied] = useState<ClientFilters>(emptyFilters);
 
@@ -136,6 +180,7 @@ export function ClientTable({
 
   const openFilterPanel = useCallback(() => {
     setDraft(applied);
+    setClientExtraPickerOpen(false);
     setFilterOpen(true);
   }, [applied]);
 
@@ -148,8 +193,51 @@ export function ClientTable({
     const z = emptyFilters();
     setDraft(z);
     setApplied(z);
+    setActiveClientExtras(new Set());
+    setActiveClientBaseFilters(new Set(CLIENT_BASE_FILTER_KEYS.map((x) => String(x.key))));
+    setClientExtraPickerOpen(false);
     setPage(1);
   }, []);
+
+  function addClientExtra(key: keyof ClientFilters) {
+    setActiveClientExtras((prev) => new Set(prev).add(String(key)));
+    setClientExtraPickerOpen(false);
+  }
+
+  function removeClientExtra(key: keyof ClientFilters) {
+    setActiveClientExtras((prev) => {
+      const n = new Set(prev);
+      n.delete(String(key));
+      return n;
+    });
+    const blank = emptyFilters();
+    setDraft((d) => ({ ...d, [key]: blank[key] }));
+  }
+
+  function removeClientBaseFilter(key: keyof ClientFilters) {
+    setActiveClientBaseFilters((prev) => {
+      const n = new Set(prev);
+      n.delete(String(key));
+      return n;
+    });
+    const blank = emptyFilters();
+    setDraft((d) => ({ ...d, [key]: blank[key] }));
+  }
+
+  function addClientBaseFilter(key: keyof ClientFilters) {
+    setActiveClientBaseFilters((prev) => new Set(prev).add(String(key)));
+    setClientExtraPickerOpen(false);
+  }
+
+  function clientBaseFieldFilled(key: keyof ClientFilters): boolean {
+    const v = draft[key];
+    return typeof v === "string" && v.trim() !== "";
+  }
+
+  function clientExtraFieldFilled(key: keyof ClientFilters): boolean {
+    const v = draft[key];
+    return typeof v === "string" && v.trim() !== "";
+  }
 
   const hasActiveFilters = useMemo(() => {
     const z = emptyFilters();
@@ -159,6 +247,57 @@ export function ClientTable({
   function toggleAll() {
     if (selected.size === allIds.length) setSelected(new Set());
     else setSelected(new Set(allIds));
+  }
+
+  async function confirmSoftDeleteClient(id: string) {
+    if (!(await showConfirm("Move this client to trash?"))) return;
+    if (!token) return;
+    const snapshots = qc.getQueriesData<ClientListPayload>({ queryKey: ["clients"] });
+    qc.setQueriesData<ClientListPayload>({ queryKey: ["clients"] }, (old) => {
+      if (!old) return old;
+      return {
+        ...old,
+        data: old.data.filter((r) => r.id !== id),
+        total: Math.max(0, old.total - 1),
+      };
+    });
+    setSelected((s) => {
+      const n = new Set(s);
+      n.delete(id);
+      return n;
+    });
+    const res = await fetch(apiUrl(`/clients/${id}`), {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) {
+      snapshots.forEach(([key, data]) => {
+        qc.setQueryData(key, data);
+      });
+      void showAlert((await res.text()) || "Delete failed.");
+      return;
+    }
+    setUndoTrashBanner({ id });
+    if (undoBannerTimerRef.current) clearTimeout(undoBannerTimerRef.current);
+    undoBannerTimerRef.current = setTimeout(() => setUndoTrashBanner(null), 20000);
+    void qc.invalidateQueries({ queryKey: ["clients"] });
+    void qc.invalidateQueries({ queryKey: ["stats"] });
+  }
+
+  async function restoreClientFromUndo() {
+    if (!undoTrashBanner || !token) return;
+    const res = await fetch(apiUrl(`/clients/${undoTrashBanner.id}/restore`), {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) {
+      void showAlert((await res.text()) || "Could not restore client.");
+      return;
+    }
+    if (undoBannerTimerRef.current) clearTimeout(undoBannerTimerRef.current);
+    setUndoTrashBanner(null);
+    void qc.invalidateQueries({ queryKey: ["clients"] });
+    void qc.invalidateQueries({ queryKey: ["stats"] });
   }
 
   const exportIds = useMemo(() => {
@@ -189,7 +328,7 @@ export function ClientTable({
         body: JSON.stringify(body),
       });
       if (!res.ok) {
-        alert((await res.text()) || "Export failed");
+        void showAlert((await res.text()) || "Export failed");
         return;
       }
       const blob = await res.blob();
@@ -286,16 +425,45 @@ export function ClientTable({
       });
     }
     setSelected(new Set());
-    setConfirmPermanent(null);
     void qc.invalidateQueries({ queryKey: ["clients"] });
     void qc.invalidateQueries({ queryKey: ["stats"] });
   }
 
   return (
     <div className="-mx-1 max-w-none px-1 md:-mx-2 md:px-2">
-      <h1 className="text-2xl font-semibold text-slate-900 dark:text-slate-100">
-        {title}
-      </h1>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <h1 className="text-2xl font-semibold text-slate-900 dark:text-slate-100">
+          {title}
+        </h1>
+        {scope === "active" ? (
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <button
+              type="button"
+              className="btn-toolbar-outline"
+              onClick={() => {
+                setImportMsg(null);
+                setImportOpen(true);
+              }}
+            >
+              <FileUp className="h-4 w-4 text-brand-600 dark:text-cyan-400" />
+              Import
+            </button>
+            <ExportFormatMenu
+              total={total}
+              selectionCount={selected.size}
+              disabled={exportBusy || rows.length === 0}
+              busy={exportBusy}
+              showPdf={false}
+              onExportCsv={(c) => void downloadExport("csv", c)}
+              onExportExcel={(c) => void downloadExport("xlsx", c)}
+            />
+            <Link href="/clients/new" className="btn-toolbar-primary">
+              <Plus className="h-4 w-4" aria-hidden />
+              Add client
+            </Link>
+          </div>
+        ) : null}
+      </div>
 
       <ImportSpreadsheetModal
         open={importOpen}
@@ -318,116 +486,78 @@ export function ClientTable({
           {selected.size > 0 ? ` — ${selected.size} selected` : ""}
         </p>
 
-        <div className="flex flex-col gap-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            className="table-toolbar-search self-start sm:self-center"
+            value={searchUrl}
+            placeholder="Search URL, niche, country…"
+            aria-label="Search"
+            onChange={(e) => {
+              setPage(1);
+              setSearchUrl(e.target.value);
+            }}
+          />
           <div className="flex flex-wrap items-center gap-2">
-            <label className="flex min-w-0 flex-col gap-1 sm:flex-row sm:items-center sm:gap-2">
-              <span className="shrink-0 text-sm font-medium text-slate-700 dark:text-slate-200">
-                Search URL
-              </span>
-              <input
-                className="min-w-0 w-full rounded border border-slate-300 px-2 py-1 text-sm sm:w-56 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
-                value={searchUrl}
-                placeholder="Search URL…"
-                onChange={(e) => {
-                  setPage(1);
-                  setSearchUrl(e.target.value);
-                }}
-              />
-            </label>
 
+          <button
+            type="button"
+            className={cn("btn-filter h-8 py-1", filterOpen && "btn-filter-active")}
+            onClick={() =>
+              filterOpen ? setFilterOpen(false) : openFilterPanel()
+            }
+          >
+            <Filter className="h-4 w-4" />
+            Filter
+            {hasActiveFilters ? (
+              <span className="rounded-full bg-white/25 px-1.5 text-[10px] text-white">
+                on
+              </span>
+            ) : null}
+          </button>
+
+          {hasActiveFilters ? (
             <button
               type="button"
-              className={cn("btn-filter", filterOpen && "btn-filter-active")}
-              onClick={() =>
-                filterOpen ? setFilterOpen(false) : openFilterPanel()
-              }
+              className="inline-flex h-8 items-center rounded-lg border border-slate-300 px-3 text-sm font-medium text-slate-800 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-100 dark:hover:bg-slate-800"
+              onClick={() => {
+                clearFilters();
+                setFilterOpen(false);
+              }}
             >
-              <Filter className="h-4 w-4" />
-              Filter
-              {hasActiveFilters ? (
-                <span className="rounded-full bg-white/25 px-1.5 text-[10px] text-white">
-                  on
-                </span>
-              ) : null}
+              Clear filter
             </button>
+          ) : null}
 
-            {hasActiveFilters ? (
-              <button
-                type="button"
-                className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-800 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-100 dark:hover:bg-slate-800"
-                onClick={() => {
-                  clearFilters();
-                  setFilterOpen(false);
-                }}
-              >
-                Clear filter
-              </button>
-            ) : null}
-
-            {scope === "active" && (
-              <>
+          <div className="relative">
+            <button
+              type="button"
+              className="btn-toolbar-outline"
+              onClick={() => setColsOpen((o) => !o)}
+            >
+              <LayoutGrid className="h-4 w-4" />
+              Columns
+              <ChevronDown className="h-3.5 w-3.5 opacity-70" />
+            </button>
+            {colsOpen && (
+              <div className="absolute right-0 z-40 mt-1 w-52 rounded-lg border border-slate-200 bg-white p-2 shadow-lg dark:border-slate-600 dark:bg-slate-800">
+                <p className="mb-2 text-xs font-medium text-slate-600 dark:text-slate-300">
+                  Table columns are fixed in this view.
+                </p>
                 <button
                   type="button"
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-800 hover:bg-slate-50 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
-                  onClick={() => {
-                    setImportMsg(null);
-                    setImportOpen(true);
-                  }}
+                  className="mt-2 w-full rounded border border-slate-200 py-1 text-xs dark:border-slate-600"
+                  onClick={() => setColsOpen(false)}
                 >
-                  <FileUp className="h-4 w-4 text-brand-600 dark:text-cyan-400" />
-                  Import
+                  Close
                 </button>
-                <ExportFormatMenu
-                  total={total}
-                  selectionCount={selected.size}
-                  disabled={exportBusy || rows.length === 0}
-                  busy={exportBusy}
-                  showPdf={false}
-                  onExportCsv={(c) => void downloadExport("csv", c)}
-                  onExportExcel={(c) => void downloadExport("xlsx", c)}
-                />
-              </>
-            )}
-
-            <div className="relative">
-              <button
-                type="button"
-                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-800 hover:bg-slate-50 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
-                onClick={() => setColsOpen((o) => !o)}
-              >
-                <LayoutGrid className="h-4 w-4" />
-                Columns
-                <ChevronDown className="h-3.5 w-3.5 opacity-70" />
-              </button>
-              {colsOpen && (
-                <div className="absolute right-0 z-40 mt-1 w-52 rounded-lg border border-slate-200 bg-white p-2 shadow-lg dark:border-slate-600 dark:bg-slate-900">
-                  <p className="mb-2 text-xs font-medium text-slate-600 dark:text-slate-300">
-                    Table columns are fixed in this view.
-                  </p>
-                  <button
-                    type="button"
-                    className="mt-2 w-full rounded border border-slate-200 py-1 text-xs dark:border-slate-600"
-                    onClick={() => setColsOpen(false)}
-                  >
-                    Close
-                  </button>
-                </div>
-              )}
-            </div>
-
-            {scope === "active" ? (
-              <div className="ml-auto flex shrink-0">
-                <Link href="/clients/new" className="btn-toolbar-primary">
-                  <Plus className="h-4 w-4" aria-hidden />
-                  Add new client
-                </Link>
               </div>
-            ) : null}
+            )}
+          </div>
           </div>
         </div>
 
         {filterOpen && (
-          <div className="rounded-xl border border-slate-200 bg-slate-50/80 p-4 dark:border-slate-600 dark:bg-slate-900/50">
+          <div className="rounded-xl border border-slate-200 bg-slate-50/80 p-4 dark:border-slate-600 dark:bg-slate-800/55">
             {refLoading || !ref ? (
               <p className="text-sm text-slate-600 dark:text-slate-400">
                 Loading filter options…
@@ -435,178 +565,207 @@ export function ClientTable({
             ) : (
               <>
                 <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                  <label className="block text-xs">
-                    <span className="font-medium text-slate-700 dark:text-slate-200">
-                      Niche
-                    </span>
-                    <select
-                      className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1.5 text-sm dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
-                      value={draft.nicheId}
-                      onChange={(e) =>
-                        setDraft((d) => ({ ...d, nicheId: e.target.value }))
-                      }
-                    >
-                      <option value="">Any</option>
-                      {ref.niches.map((n) => (
-                        <option key={n.id} value={n.id}>
-                          {n.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="block text-xs">
-                    <span className="font-medium text-slate-700 dark:text-slate-200">
-                      Country
-                    </span>
-                    <select
-                      className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1.5 text-sm dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
-                      value={draft.countryId}
-                      onChange={(e) =>
-                        setDraft((d) => ({ ...d, countryId: e.target.value }))
-                      }
-                    >
-                      <option value="">Any</option>
-                      {ref.countries.map((c) => (
-                        <option key={c.id} value={c.id}>
-                          {c.code} — {c.name}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="block text-xs">
-                    <span className="font-medium text-slate-700 dark:text-slate-200">
-                      Language
-                    </span>
-                    <select
-                      className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1.5 text-sm dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
-                      value={draft.languageId}
-                      onChange={(e) =>
-                        setDraft((d) => ({
-                          ...d,
-                          languageId: e.target.value,
-                        }))
-                      }
-                    >
-                      <option value="">Any</option>
-                      {ref.languages.map((l) => (
-                        <option key={l.id} value={l.id}>
-                          {l.name}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="block text-xs">
-                    <span className="font-medium text-slate-700 dark:text-slate-200">
-                      Traffic (min – max)
-                    </span>
-                    <input
-                      type="text"
-                      className="mt-1 w-full rounded border border-slate-300 px-2 py-1.5 font-mono text-sm dark:border-slate-600 dark:bg-slate-800"
-                      value={draft.traffic}
-                      onChange={(e) =>
-                        setDraft((d) => ({ ...d, traffic: e.target.value }))
-                      }
-                      placeholder="min - max"
-                    />
-                  </label>
-                  <label className="block text-xs">
-                    <span className="font-medium text-slate-700 dark:text-slate-200">
-                      DR (min – max)
-                    </span>
-                    <input
-                      type="text"
-                      className="mt-1 w-full rounded border border-slate-300 px-2 py-1.5 font-mono text-sm dark:border-slate-600 dark:bg-slate-800"
-                      value={draft.dr}
-                      onChange={(e) =>
-                        setDraft((d) => ({ ...d, dr: e.target.value }))
-                      }
-                      placeholder="min - max"
-                    />
-                  </label>
+                  {CLIENT_BASE_FILTER_KEYS.filter(({ key }) => activeClientBaseFilters.has(String(key))).map(
+                    ({ key, label }) => (
+                      <div
+                        key={key}
+                        className="group relative rounded-lg border border-slate-200/90 bg-white/70 p-2 pr-8 dark:border-slate-600 dark:bg-slate-900/40"
+                      >
+                        <button
+                          type="button"
+                          title="Remove filter"
+                          className={cn(
+                            "absolute right-1 top-1 rounded p-0.5 text-slate-500 transition hover:bg-slate-200 hover:text-slate-800 dark:hover:bg-slate-700 dark:hover:text-slate-100",
+                            clientBaseFieldFilled(key)
+                              ? "opacity-100"
+                              : "opacity-0 group-hover:opacity-100",
+                          )}
+                          onClick={() => removeClientBaseFilter(key)}
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </button>
+                        {key === "nicheId" ? (
+                          <label className="block text-xs">
+                            <span className="font-medium text-slate-700 dark:text-slate-200">{label}</span>
+                            <select
+                              className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1.5 text-sm dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
+                              value={draft.nicheId}
+                              onChange={(e) => setDraft((d) => ({ ...d, nicheId: e.target.value }))}
+                            >
+                              <option value="">Any</option>
+                              {ref.niches.map((n) => (
+                                <option key={n.id} value={n.id}>
+                                  {n.label}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        ) : null}
+                        {key === "countryId" ? (
+                          <label className="block text-xs">
+                            <span className="font-medium text-slate-700 dark:text-slate-200">{label}</span>
+                            <select
+                              className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1.5 text-sm dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
+                              value={draft.countryId}
+                              onChange={(e) => setDraft((d) => ({ ...d, countryId: e.target.value }))}
+                            >
+                              <option value="">Any</option>
+                              {ref.countries.map((c) => (
+                                <option key={c.id} value={c.id}>
+                                  {c.code} — {c.name}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        ) : null}
+                        {key === "languageId" ? (
+                          <label className="block text-xs">
+                            <span className="font-medium text-slate-700 dark:text-slate-200">{label}</span>
+                            <select
+                              className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1.5 text-sm dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
+                              value={draft.languageId}
+                              onChange={(e) => setDraft((d) => ({ ...d, languageId: e.target.value }))}
+                            >
+                              <option value="">Any</option>
+                              {ref.languages.map((l) => (
+                                <option key={l.id} value={l.id}>
+                                  {l.name}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        ) : null}
+                        {key === "traffic" ? (
+                          <label className="block text-xs">
+                            <span className="font-medium text-slate-700 dark:text-slate-200">{label}</span>
+                            <input
+                              type="text"
+                              className="mt-1 w-full rounded border border-slate-300 px-2 py-1.5 font-mono text-sm dark:border-slate-600 dark:bg-slate-800"
+                              value={draft.traffic}
+                              onChange={(e) => setDraft((d) => ({ ...d, traffic: e.target.value }))}
+                              placeholder="min - max"
+                            />
+                          </label>
+                        ) : null}
+                        {key === "dr" ? (
+                          <label className="block text-xs">
+                            <span className="font-medium text-slate-700 dark:text-slate-200">{label}</span>
+                            <input
+                              type="text"
+                              className="mt-1 w-full rounded border border-slate-300 px-2 py-1.5 font-mono text-sm dark:border-slate-600 dark:bg-slate-800"
+                              value={draft.dr}
+                              onChange={(e) => setDraft((d) => ({ ...d, dr: e.target.value }))}
+                              placeholder="min - max"
+                            />
+                          </label>
+                        ) : null}
+                      </div>
+                    ),
+                  )}
                 </div>
 
-                {moreFilters && (
+                {CLIENT_EXTRA_ORDER.some(({ key }) => activeClientExtras.has(String(key))) ? (
                   <div className="mt-3 grid gap-3 border-t border-slate-200 pt-3 dark:border-slate-600 sm:grid-cols-2 lg:grid-cols-3">
-                    <label className="block text-xs">
-                      <span className="font-medium text-slate-700 dark:text-slate-200">
-                        Moz DA (min – max)
-                      </span>
-                      <input
-                        type="text"
-                        className="mt-1 w-full rounded border border-slate-300 px-2 py-1.5 font-mono text-sm dark:border-slate-600 dark:bg-slate-800"
-                        value={draft.mozDa}
-                        onChange={(e) =>
-                          setDraft((d) => ({ ...d, mozDa: e.target.value }))
-                        }
-                        placeholder="min - max"
-                      />
-                    </label>
-                    <label className="block text-xs">
-                      <span className="font-medium text-slate-700 dark:text-slate-200">
-                        Authority score (min – max)
-                      </span>
-                      <input
-                        type="text"
-                        className="mt-1 w-full rounded border border-slate-300 px-2 py-1.5 font-mono text-sm dark:border-slate-600 dark:bg-slate-800"
-                        value={draft.as}
-                        onChange={(e) =>
-                          setDraft((d) => ({ ...d, as: e.target.value }))
-                        }
-                        placeholder="min - max"
-                      />
-                    </label>
-                    <label className="block text-xs">
-                      <span className="font-medium text-slate-700 dark:text-slate-200">
-                        Ref. domains (min – max)
-                      </span>
-                      <input
-                        type="text"
-                        className="mt-1 w-full rounded border border-slate-300 px-2 py-1.5 font-mono text-sm dark:border-slate-600 dark:bg-slate-800"
-                        value={draft.ref}
-                        onChange={(e) =>
-                          setDraft((d) => ({ ...d, ref: e.target.value }))
-                        }
-                        placeholder="min - max"
-                      />
-                    </label>
-                    <label className="block text-xs">
-                      <span className="font-medium text-slate-700 dark:text-slate-200">
-                        Backlinks (min – max)
-                      </span>
-                      <input
-                        type="text"
-                        className="mt-1 w-full rounded border border-slate-300 px-2 py-1.5 font-mono text-sm dark:border-slate-600 dark:bg-slate-800"
-                        value={draft.backlinks}
-                        onChange={(e) =>
-                          setDraft((d) => ({
-                            ...d,
-                            backlinks: e.target.value,
-                          }))
-                        }
-                        placeholder="min - max"
-                      />
-                    </label>
+                    {CLIENT_EXTRA_ORDER.filter(({ key }) => activeClientExtras.has(String(key))).map(
+                      ({ key, label }) => (
+                        <div
+                          key={key}
+                          className="group relative rounded-lg border border-slate-200/90 bg-white/70 p-2 pr-8 dark:border-slate-600 dark:bg-slate-900/40"
+                        >
+                          <button
+                            type="button"
+                            className={cn(
+                              "absolute right-1 top-1 rounded p-0.5 text-slate-500 transition hover:bg-slate-200 hover:text-slate-800 dark:hover:bg-slate-700 dark:hover:text-slate-100",
+                              clientExtraFieldFilled(key)
+                                ? "opacity-100"
+                                : "opacity-0 group-hover:opacity-100",
+                            )}
+                            title="Remove filter"
+                            onClick={() => removeClientExtra(key)}
+                          >
+                            <X className="h-3.5 w-3.5" />
+                          </button>
+                          <label className="block text-xs">
+                            <span className="font-medium text-slate-700 dark:text-slate-200">{label}</span>
+                            <input
+                              type="text"
+                              className="mt-1 w-full rounded border border-slate-300 px-2 py-1.5 font-mono text-sm dark:border-slate-600 dark:bg-slate-800"
+                              value={draft[key] as string}
+                              onChange={(e) => setDraft((d) => ({ ...d, [key]: e.target.value }))}
+                              placeholder="min - max"
+                            />
+                          </label>
+                        </div>
+                      ),
+                    )}
                   </div>
-                )}
+                ) : null}
 
                 <div className="mt-4 flex flex-wrap items-center gap-2">
                   <button
                     type="button"
-                    className="rounded-lg bg-brand-gradient px-4 py-1.5 text-sm font-semibold text-white dark:ring-1 dark:ring-cyan-500/30"
+                    className="rounded-lg bg-blue-600 px-4 py-1.5 text-sm font-semibold text-white hover:bg-blue-700 dark:bg-blue-600 dark:hover:bg-blue-500"
                     onClick={() => {
                       applyFilters();
                       setFilterOpen(false);
+                      setClientExtraPickerOpen(false);
                     }}
                   >
                     Apply filters
                   </button>
-                  <button
-                    type="button"
-                    className="text-sm text-brand-700 underline dark:text-cyan-400"
-                    onClick={() => setMoreFilters((m) => !m)}
-                  >
-                    {moreFilters ? "Fewer filters" : "More filters"}
-                  </button>
+                  <div className="relative">
+                    <button
+                      type="button"
+                      className="text-sm text-brand-700 underline dark:text-cyan-400"
+                      onClick={() => setClientExtraPickerOpen((o) => !o)}
+                    >
+                      More filters
+                    </button>
+                    {clientExtraPickerOpen ? (
+                      <>
+                        <button
+                          type="button"
+                          className="fixed inset-0 z-30 cursor-default"
+                          aria-label="Close"
+                          onClick={() => setClientExtraPickerOpen(false)}
+                        />
+                        <ul className="absolute left-0 top-full z-40 mt-1 max-h-56 min-w-[12rem] overflow-y-auto rounded-lg border border-slate-200 bg-white py-1 text-sm shadow-lg dark:border-slate-600 dark:bg-slate-800">
+                          {CLIENT_BASE_FILTER_KEYS.filter(({ key }) => !activeClientBaseFilters.has(String(key))).map(
+                            ({ key, label }) => (
+                              <li key={`base-${String(key)}`}>
+                                <button
+                                  type="button"
+                                  className="block w-full px-3 py-2 text-left text-slate-800 hover:bg-slate-100 dark:text-slate-100 dark:hover:bg-slate-700"
+                                  onClick={() => addClientBaseFilter(key)}
+                                >
+                                  {label}
+                                </button>
+                              </li>
+                            ),
+                          )}
+                          {CLIENT_EXTRA_ORDER.filter(({ key }) => !activeClientExtras.has(String(key))).map(
+                            ({ key, label }) => (
+                              <li key={String(key)}>
+                                <button
+                                  type="button"
+                                  className="block w-full px-3 py-2 text-left text-slate-800 hover:bg-slate-100 dark:text-slate-100 dark:hover:bg-slate-700"
+                                  onClick={() => addClientExtra(key)}
+                                >
+                                  {label}
+                                </button>
+                              </li>
+                            ),
+                          )}
+                          {CLIENT_BASE_FILTER_KEYS.filter(({ key }) => !activeClientBaseFilters.has(String(key)))
+                            .length === 0 &&
+                          CLIENT_EXTRA_ORDER.filter(({ key }) => !activeClientExtras.has(String(key))).length ===
+                            0 ? (
+                            <li className="px-3 py-2 text-slate-500">All filters are shown</li>
+                          ) : null}
+                        </ul>
+                      </>
+                    ) : null}
+                  </div>
                 </div>
               </>
             )}
@@ -619,25 +778,41 @@ export function ClientTable({
           <button
             type="button"
             className="rounded-lg border border-red-200 bg-red-50 px-3 py-1.5 text-sm font-medium text-red-800 hover:bg-red-100"
-            onClick={() =>
-              setConfirmPermanent({ ids: [...selected], qty: selected.size })
-            }
+            onClick={() => {
+              const ids = [...selected];
+              void (async () => {
+                if (!ids.length) return;
+                if (!(await showConfirm(`Permanently delete ${ids.length} site(s)? This cannot be undone.`)))
+                  return;
+                await runPermanentDelete(ids);
+              })();
+            }}
           >
             Delete selected permanently
           </button>
         </div>
       )}
 
+      {undoTrashBanner && scope === "active" ? (
+        <div className="mt-4 flex items-center justify-between rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm text-emerald-950 dark:border-emerald-500/35 dark:bg-emerald-950/30 dark:text-emerald-100">
+          <span>Client moved to trash.</span>
+          <button type="button" className="font-medium underline" onClick={() => void restoreClientFromUndo()}>
+            Undo
+          </button>
+        </div>
+      ) : null}
+
       {isLoading && <p className="mt-4">Loading…</p>}
 
-      <div className="mt-4 overflow-x-auto rounded-lg border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900">
-        <table className="min-w-full text-left text-sm">
-          <thead className="border-b bg-slate-50 dark:border-slate-600 dark:bg-slate-800">
+      <div className="data-table-shell mt-4">
+        <table className="min-w-full text-center text-[11px]">
+          <thead className="data-table-thead">
             <tr>
               {scope === "active" && (
-                <th className="p-2">
+                <th className="w-10 p-2.5 align-middle">
                   <input
                     type="checkbox"
+                    className="mx-auto block"
                     checked={
                       allIds.length > 0 && selected.size === allIds.length
                     }
@@ -646,9 +821,10 @@ export function ClientTable({
                 </th>
               )}
               {scope === "trash" && (
-                <th className="p-2">
+                <th className="w-10 p-2.5 align-middle">
                   <input
                     type="checkbox"
+                    className="mx-auto block"
                     checked={
                       allIds.length > 0 && selected.size === allIds.length
                     }
@@ -656,28 +832,32 @@ export function ClientTable({
                   />
                 </th>
               )}
-              <th className="p-2">Site URL</th>
-              <th className="p-2">Niche</th>
-              <th className="p-2">Country</th>
-              <th className="p-2">Language</th>
-              <th className="p-2">Traffic</th>
-              <th className="p-2">DR</th>
-              <th className="p-2">Actions</th>
+              <th className="w-10 p-2.5">#</th>
+              <th className="min-w-[10rem] p-2.5">Site URL</th>
+              <th className="p-2.5">Niche</th>
+              <th className="p-2.5">Country</th>
+              <th className="p-2.5">Language</th>
+              <th className="p-2.5">Traffic</th>
+              <th className="p-2.5">DR</th>
+              <th className="p-2.5">Actions</th>
             </tr>
           </thead>
           <tbody>
-            {rows.map((r) => {
+            {rows.map((r, rowIdx) => {
               const badge = r.completedOrderCount ?? 0;
               const cls =
                 badge >= 10 ? "text-green-600" : "text-red-600";
+              const rowNum = (page - 1) * limit + rowIdx + 1;
+              const nicheWord = nicheFirstWord(r.niches[0]?.niche.label);
               return (
                 <tr
                   key={r.id}
-                  className="border-b border-slate-100 dark:border-slate-700"
+                  className="data-table-row"
                 >
-                  <td className="p-2">
+                  <td className="data-table-td">
                     <input
                       type="checkbox"
+                      className="mx-auto block"
                       checked={selected.has(r.id)}
                       onChange={() => {
                         const n = new Set(selected);
@@ -687,91 +867,114 @@ export function ClientTable({
                       }}
                     />
                   </td>
-                  <td className="p-2 text-sm font-medium text-sky-700 dark:text-sky-400">
-                    <span
-                      className={`mr-1.5 inline-flex min-w-[1rem] justify-center rounded bg-slate-100 px-0.5 text-[10px] font-bold leading-tight dark:bg-slate-800 ${cls}`}
-                    >
-                      {badge}
-                    </span>
-                    {r.siteUrl}
+                  <td className="data-table-td tabular-nums text-slate-500 dark:text-slate-400">
+                    {rowNum}
+                  </td>
+                  <td className="data-table-td max-w-[14rem]">
+                    <div className="mx-auto flex max-w-full min-w-0 items-center justify-center gap-1">
+                      <span className="inline-flex min-w-[1.1rem] shrink-0 justify-center rounded bg-slate-100 px-0.5 text-[10px] font-bold leading-tight dark:bg-slate-800">
+                        <span className={cls}>{badge}</span>
+                      </span>
+                      <a
+                        href={siteHref(r.siteUrl)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="min-w-0 truncate text-[11px] font-medium text-sky-700 hover:underline dark:text-sky-400"
+                      >
+                        {r.siteUrl.replace(/^https?:\/\//, "")}
+                      </a>
+                      <a
+                        href={siteHref(r.siteUrl)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="shrink-0 text-slate-400 hover:text-sky-600 dark:hover:text-sky-400"
+                        aria-label="Open site"
+                      >
+                        <ExternalLink className="h-3 w-3" />
+                      </a>
+                    </div>
                   </td>
                   <td
-                    className="max-w-[8rem] truncate p-2 text-xs text-slate-700 dark:text-slate-300"
+                    className="data-table-td max-w-[8rem]"
                     title={r.niches.map((n) => n.niche.label).join(", ")}
                   >
-                    {nicheFirstWord(r.niches[0]?.niche.label)}
+                    <NicheTablePill text={nicheWord} />
                   </td>
                   <td
-                    className="max-w-[7rem] truncate p-2 text-xs text-slate-700 dark:text-slate-300"
+                    className="data-table-td max-w-[7rem] truncate"
                     title={r.countries.map((c) => c.country.name).join(", ")}
                   >
                     {countriesShortList(r.countries)}
                   </td>
-                  <td className="max-w-[7rem] truncate p-2 text-xs text-slate-700 dark:text-slate-300">
+                  <td className="data-table-td max-w-[7rem] truncate">
                     {r.language.name}
                   </td>
-                  <td className="p-2 text-xs tabular-nums text-slate-700 dark:text-slate-300">
-                    {r.traffic}
+                  <td className="data-table-td tabular-nums">
+                    {r.traffic.toLocaleString()}
                   </td>
-                  <td className="p-2 text-xs tabular-nums text-slate-700 dark:text-slate-300">
-                    {r.dr}
+                  <td className="data-table-td">
+                    <DrTableMeter dr={r.dr} />
                   </td>
-                  <td className="space-x-2 whitespace-nowrap p-2 text-xs">
-                    <Link
-                      href={`/clients/${r.id}`}
-                      className="text-sky-600 hover:underline dark:text-sky-400"
-                    >
-                      View
-                    </Link>
-                    {scope === "active" ? (
-                      <>
-                        <Link
-                          href={`/clients/${r.id}/edit`}
-                          className="text-sky-600 hover:underline dark:text-sky-400"
-                        >
-                          Edit
-                        </Link>
-                        <button
-                          type="button"
-                          className="text-red-600 hover:underline"
-                          onClick={async () => {
-                            await fetch(apiUrl(`/clients/${r.id}`), {
-                              method: "DELETE",
-                              headers: { Authorization: `Bearer ${token}` },
-                            });
-                            void qc.invalidateQueries({ queryKey: ["clients"] });
-                            void qc.invalidateQueries({ queryKey: ["stats"] });
-                          }}
-                        >
-                          Delete
-                        </button>
-                      </>
-                    ) : (
-                      <>
-                        <button
-                          type="button"
-                          className="text-sky-600 hover:underline dark:text-sky-400"
-                          onClick={async () => {
-                            await fetch(apiUrl(`/clients/${r.id}/restore`), {
-                              method: "POST",
-                              headers: { Authorization: `Bearer ${token}` },
-                            });
-                            void qc.invalidateQueries({ queryKey: ["clients"] });
-                          }}
-                        >
-                          Restore
-                        </button>
-                        <button
-                          type="button"
-                          className="text-red-600 hover:underline"
-                          onClick={() =>
-                            setConfirmPermanent({ ids: [r.id], qty: 1 })
-                          }
-                        >
-                          Delete
-                        </button>
-                      </>
-                    )}
+                  <td className="data-table-td whitespace-nowrap">
+                    <div className="inline-flex flex-nowrap items-center justify-center gap-1">
+                      <Link
+                        href={`/clients/${r.id}`}
+                        className="inline-flex rounded p-1.5 text-slate-600 hover:bg-slate-100 hover:text-sky-600 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-sky-400"
+                        title="View"
+                      >
+                        <Eye className="h-4 w-4" />
+                      </Link>
+                      {scope === "active" ? (
+                        <>
+                          <Link
+                            href={`/clients/${r.id}/edit`}
+                            className="inline-flex rounded p-1.5 text-slate-600 hover:bg-slate-100 hover:text-sky-600 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-sky-400"
+                            title="Edit"
+                          >
+                            <Pencil className="h-4 w-4" />
+                          </Link>
+                          <button
+                            type="button"
+                            className="inline-flex rounded p-1.5 text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/40"
+                            title="Delete"
+                            onClick={() => void confirmSoftDeleteClient(r.id)}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            className="inline-flex rounded p-1.5 text-sky-600 hover:bg-slate-100 dark:text-sky-400 dark:hover:bg-slate-800"
+                            title="Restore"
+                            onClick={async () => {
+                              await fetch(apiUrl(`/clients/${r.id}/restore`), {
+                                method: "POST",
+                                headers: { Authorization: `Bearer ${token}` },
+                              });
+                              void qc.invalidateQueries({ queryKey: ["clients"] });
+                            }}
+                          >
+                            <RotateCcw className="h-4 w-4" />
+                          </button>
+                          <button
+                            type="button"
+                            className="inline-flex rounded p-1.5 text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/40"
+                            title="Delete permanently"
+                            onClick={() =>
+                              void (async () => {
+                                if (!(await showConfirm("Permanently delete this client? This cannot be undone.")))
+                                  return;
+                                await runPermanentDelete([r.id]);
+                              })()
+                            }
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        </>
+                      )}
+                    </div>
                   </td>
                 </tr>
               );
@@ -788,32 +991,6 @@ export function ClientTable({
         onPageChange={setPage}
       />
 
-      {confirmPermanent && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="max-w-md rounded-xl bg-white p-6 shadow-2xl dark:bg-slate-900 dark:text-slate-100">
-            <p className="text-sm text-slate-800 dark:text-slate-200">
-              The app is permanently deleting {confirmPermanent.qty} site
-              {confirmPermanent.qty === 1 ? "" : "s"}. This cannot be undone.
-            </p>
-            <div className="mt-5 flex justify-end gap-2">
-              <button
-                type="button"
-                className="rounded-lg border border-slate-200 px-4 py-2 text-sm font-medium hover:bg-slate-50 dark:border-slate-600 dark:hover:bg-slate-800"
-                onClick={() => setConfirmPermanent(null)}
-              >
-                No
-              </button>
-              <button
-                type="button"
-                className="rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700"
-                onClick={() => void runPermanentDelete(confirmPermanent.ids)}
-              >
-                Yes
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

@@ -1,54 +1,102 @@
 "use client";
 
-import { createContext, useCallback, useContext, useLayoutEffect, useState } from "react";
-import { setThemeCookieClient, THEME_STORAGE_KEY } from "@/lib/theme-storage";
+import { useQuery } from "@tanstack/react-query";
+import { useSession } from "next-auth/react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useLayoutEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
+import { apiFetch } from "@/lib/api";
+import {
+  resolveThemeDark,
+  setThemeCookieClient,
+  THEME_STORAGE_KEY,
+  type ThemePreference,
+} from "@/lib/theme-storage";
 
-function readStoredTheme(): boolean {
+function readStoredPreference(): ThemePreference {
   try {
-    const stored = localStorage.getItem(THEME_STORAGE_KEY);
-    if (stored === "dark") return true;
-    if (stored === "light") return false;
-    return window.matchMedia("(prefers-color-scheme: dark)").matches;
+    const s = localStorage.getItem(THEME_STORAGE_KEY);
+    if (s === "dark" || s === "light" || s === "system") return s;
   } catch {
-    return typeof document !== "undefined" && document.documentElement.classList.contains("dark");
+    /* private mode */
   }
+  return "system";
 }
 
-function applyDarkClass(next: boolean) {
+function applyPreference(pref: ThemePreference) {
+  const dark = resolveThemeDark(pref);
   const root = document.documentElement;
-  root.classList.toggle("dark", next);
-  root.style.colorScheme = next ? "dark" : "light";
-  const v = next ? "dark" : "light";
+  root.classList.toggle("dark", dark);
+  root.style.colorScheme = dark ? "dark" : "light";
   try {
-    localStorage.setItem(THEME_STORAGE_KEY, v);
+    localStorage.setItem(THEME_STORAGE_KEY, pref);
   } catch {
-    /* private mode / blocked storage */
+    /* ignore */
   }
-  setThemeCookieClient(v);
+  setThemeCookieClient(dark ? "dark" : "light");
 }
 
-type ThemeCtx = { dark: boolean; toggle: () => void };
+type ThemeCtx = {
+  preference: ThemePreference;
+  /** Resolved UI dark flag (system → prefers-color-scheme). */
+  resolvedDark: boolean;
+  setPreference: (p: ThemePreference) => void;
+};
+
 const ThemeContext = createContext<ThemeCtx | null>(null);
 
-export function ThemeProvider({ children }: { children: React.ReactNode }) {
-  const [dark, setDark] = useState(false);
+export function ThemeProvider({ children }: { children: ReactNode }) {
+  const { data: session, status } = useSession();
+  const token = session?.accessToken;
 
-  /** Align DOM + state with localStorage (inline script in layout already set `html.dark`). */
+  const { data: me } = useQuery({
+    queryKey: ["users", "me", "theme", token],
+    queryFn: () =>
+      apiFetch<{ themePreference?: string | null }>("/users/me", token),
+    enabled: status === "authenticated" && !!token,
+  });
+
+  const [preference, setPreferenceState] = useState<ThemePreference>("system");
+
   useLayoutEffect(() => {
-    const next = readStoredTheme();
-    applyDarkClass(next);
-    setDark(next);
+    const fromServer = me?.themePreference;
+    if (fromServer === "light" || fromServer === "dark" || fromServer === "system") {
+      setPreferenceState(fromServer);
+      applyPreference(fromServer);
+      return;
+    }
+    const local = readStoredPreference();
+    setPreferenceState(local);
+    applyPreference(local);
+  }, [me?.themePreference]);
+
+  useLayoutEffect(() => {
+    if (preference !== "system") return;
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const onChange = () => applyPreference("system");
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, [preference]);
+
+  const setPreference = useCallback((p: ThemePreference) => {
+    setPreferenceState(p);
+    applyPreference(p);
   }, []);
 
-  const toggle = useCallback(() => {
-    setDark((d) => {
-      const next = !d;
-      applyDarkClass(next);
-      return next;
-    });
-  }, []);
+  const resolvedDark = useMemo(() => resolveThemeDark(preference), [preference]);
 
-  return <ThemeContext.Provider value={{ dark, toggle }}>{children}</ThemeContext.Provider>;
+  const value = useMemo(
+    () => ({ preference, resolvedDark, setPreference }),
+    [preference, resolvedDark, setPreference],
+  );
+
+  return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
 }
 
 export function useTheme() {
