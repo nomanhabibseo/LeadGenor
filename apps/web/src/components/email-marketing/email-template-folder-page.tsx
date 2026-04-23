@@ -7,6 +7,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { FileText, Pencil, Plus, Search, Trash2 } from "lucide-react";
 import { useAppDialog } from "@/contexts/app-dialog-context";
 import { apiFetch } from "@/lib/api";
+import { invalidateTemplateRelatedQueries } from "@/lib/invalidate-template-queries";
 import { sessionQueryUserKey } from "@/lib/session-query-scope";
 
 type Tpl = { id: string; name: string; updatedAt: string };
@@ -53,8 +54,7 @@ export function EmailTemplateFolderPage({ folderId }: { folderId: string }) {
     mutationFn: (id: string) =>
       apiFetch(`/email-marketing/templates/items/${id}`, token, { method: "DELETE" }),
     onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: ["template-items", userKey, folderId] });
-      void qc.invalidateQueries({ queryKey: ["template-folders", userKey] });
+      void invalidateTemplateRelatedQueries(qc, userKey, { folderId });
     },
   });
 

@@ -7,14 +7,10 @@ import { useCallback, useMemo, useRef, useState } from "react";
 import {
   ChevronDown,
   ExternalLink,
-  Eye,
   FileUp,
   Filter,
   LayoutGrid,
-  Pencil,
   Plus,
-  RotateCcw,
-  Trash2,
   X,
 } from "lucide-react";
 import { useAppDialog } from "@/contexts/app-dialog-context";
@@ -25,13 +21,13 @@ import { TablePagination } from "@/components/table-pagination";
 import { useReference } from "@/hooks/use-reference";
 import { appendRangeParams } from "@/lib/range-query";
 import { cn } from "@/lib/utils";
-import {
-  countriesShortList,
-  nicheFirstWord,
-} from "@/lib/vendor-table-display";
+import { nicheFirstWord } from "@/lib/vendor-table-display";
 import { DrTableMeter, NicheTablePill } from "@/components/table-status-badges";
+import { CountryFlagsCell } from "@/components/country-flags-cell";
+import { DataTableRowMenu, type RowMenuItem } from "@/components/data-table-row-menu";
+import { TrafficSparkline } from "@/components/traffic-sparkline";
 
-const PAGE_SIZE = 100;
+const DEFAULT_LIST_LIMIT = 20;
 
 type Row = {
   id: string;
@@ -101,11 +97,12 @@ function buildClientListUrl(
   page: number,
   searchUrl: string,
   f: ClientFilters,
+  listLimit: number,
 ) {
   const qs = new URLSearchParams();
   qs.set("scope", scopeParam);
   qs.set("page", String(page));
-  qs.set("limit", String(PAGE_SIZE));
+  qs.set("limit", String(listLimit));
   if (searchUrl.trim()) qs.set("searchUrl", searchUrl.trim());
   if (f.nicheId) qs.set("nicheIds", f.nicheId);
   if (f.countryId) qs.set("countryIds", f.countryId);
@@ -133,6 +130,7 @@ export function ClientTable({
   const { data: ref, isLoading: refLoading } = useReference();
   const [searchUrl, setSearchUrl] = useState("");
   const [page, setPage] = useState(1);
+  const listLimit = DEFAULT_LIST_LIMIT;
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const undoBannerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [undoTrashBanner, setUndoTrashBanner] = useState<{ id: string } | null>(null);
@@ -155,12 +153,12 @@ export function ClientTable({
   const scopeParam = scope === "active" ? "active" : "trash";
 
   const listUrl = useMemo(
-    () => buildClientListUrl(scopeParam, page, searchUrl, applied),
-    [scopeParam, page, searchUrl, applied],
+    () => buildClientListUrl(scopeParam, page, searchUrl, applied, listLimit),
+    [scopeParam, page, searchUrl, applied, listLimit],
   );
 
   const { data, isLoading } = useQuery({
-    queryKey: ["clients", scopeParam, page, searchUrl, applied],
+    queryKey: ["clients", scopeParam, page, listLimit, searchUrl, applied],
     queryFn: () =>
       apiFetch<{ data: Row[]; total: number; page: number; limit: number }>(
         listUrl,
@@ -171,7 +169,7 @@ export function ClientTable({
 
   const rows = useMemo(() => data?.data ?? [], [data?.data]);
   const total = data?.total ?? 0;
-  const limit = data?.limit ?? PAGE_SIZE;
+  const limit = data?.limit ?? listLimit;
   const totalPages = Math.max(1, Math.ceil(total / limit));
   const from = total === 0 ? 0 : (page - 1) * limit + 1;
   const to = Math.min(page * limit, total);
@@ -481,7 +479,7 @@ export function ClientTable({
       <div className="mt-4 space-y-3 text-xs text-slate-600 dark:text-slate-400">
         <p>
           <span className="text-[11px] font-medium">
-            {from}–{to} of {total}
+            {from} - {to} of {total}
           </span>
           {selected.size > 0 ? ` — ${selected.size} selected` : ""}
         </p>
@@ -900,81 +898,65 @@ export function ClientTable({
                   >
                     <NicheTablePill text={nicheWord} />
                   </td>
-                  <td
-                    className="data-table-td max-w-[7rem] truncate"
-                    title={r.countries.map((c) => c.country.name).join(", ")}
-                  >
-                    {countriesShortList(r.countries)}
+                  <td className="data-table-td max-w-[10rem]" title={r.countries.map((c) => c.country.name).join(", ")}>
+                    <CountryFlagsCell countries={r.countries} />
                   </td>
                   <td className="data-table-td max-w-[7rem] truncate">
                     {r.language.name}
                   </td>
-                  <td className="data-table-td tabular-nums">
-                    {r.traffic.toLocaleString()}
+                  <td className="data-table-td">
+                    <div className="inline-flex min-w-0 items-center justify-center gap-1.5 tabular-nums">
+                      <TrafficSparkline value={r.traffic} seed={r.id} />
+                      <span>{r.traffic.toLocaleString()}</span>
+                    </div>
                   </td>
                   <td className="data-table-td">
                     <DrTableMeter dr={r.dr} />
                   </td>
                   <td className="data-table-td whitespace-nowrap">
-                    <div className="inline-flex flex-nowrap items-center justify-center gap-1">
-                      <Link
-                        href={`/clients/${r.id}`}
-                        className="inline-flex rounded p-1.5 text-slate-600 hover:bg-slate-100 hover:text-sky-600 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-sky-400"
-                        title="View"
-                      >
-                        <Eye className="h-4 w-4" />
-                      </Link>
-                      {scope === "active" ? (
-                        <>
-                          <Link
-                            href={`/clients/${r.id}/edit`}
-                            className="inline-flex rounded p-1.5 text-slate-600 hover:bg-slate-100 hover:text-sky-600 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-sky-400"
-                            title="Edit"
-                          >
-                            <Pencil className="h-4 w-4" />
-                          </Link>
-                          <button
-                            type="button"
-                            className="inline-flex rounded p-1.5 text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/40"
-                            title="Delete"
-                            onClick={() => void confirmSoftDeleteClient(r.id)}
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </button>
-                        </>
-                      ) : (
-                        <>
-                          <button
-                            type="button"
-                            className="inline-flex rounded p-1.5 text-sky-600 hover:bg-slate-100 dark:text-sky-400 dark:hover:bg-slate-800"
-                            title="Restore"
-                            onClick={async () => {
-                              await fetch(apiUrl(`/clients/${r.id}/restore`), {
-                                method: "POST",
-                                headers: { Authorization: `Bearer ${token}` },
-                              });
-                              void qc.invalidateQueries({ queryKey: ["clients"] });
-                            }}
-                          >
-                            <RotateCcw className="h-4 w-4" />
-                          </button>
-                          <button
-                            type="button"
-                            className="inline-flex rounded p-1.5 text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/40"
-                            title="Delete permanently"
-                            onClick={() =>
-                              void (async () => {
-                                if (!(await showConfirm("Permanently delete this client? This cannot be undone.")))
-                                  return;
-                                await runPermanentDelete([r.id]);
-                              })()
-                            }
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </button>
-                        </>
-                      )}
-                    </div>
+                    <DataTableRowMenu
+                      items={
+                        scope === "active"
+                          ? ([
+                              { key: "v", type: "link", label: "View", href: `/clients/${r.id}` },
+                              { key: "e", type: "link", label: "Edit", href: `/clients/${r.id}/edit` },
+                              {
+                                key: "d",
+                                type: "button",
+                                label: "Delete",
+                                danger: true,
+                                onClick: () => void confirmSoftDeleteClient(r.id),
+                              },
+                            ] satisfies RowMenuItem[])
+                          : ([
+                              {
+                                key: "r",
+                                type: "button",
+                                label: "Restore",
+                                onClick: () => {
+                                  void (async () => {
+                                    await fetch(apiUrl(`/clients/${r.id}/restore`), {
+                                      method: "POST",
+                                      headers: { Authorization: `Bearer ${token}` },
+                                    });
+                                    void qc.invalidateQueries({ queryKey: ["clients"] });
+                                  })();
+                                },
+                              },
+                              {
+                                key: "p",
+                                type: "button",
+                                label: "Delete permanently",
+                                danger: true,
+                                onClick: () =>
+                                  void (async () => {
+                                    if (!(await showConfirm("Permanently delete this client? This cannot be undone."))) return;
+                                    await runPermanentDelete([r.id]);
+                                  })(),
+                              },
+                            ] satisfies RowMenuItem[])
+                      }
+                    />
                   </td>
                 </tr>
               );
@@ -986,9 +968,9 @@ export function ClientTable({
       <TablePagination
         page={page}
         totalPages={totalPages}
-        total={total}
         limit={limit}
         onPageChange={setPage}
+        showLimitSelect={false}
       />
 
     </div>

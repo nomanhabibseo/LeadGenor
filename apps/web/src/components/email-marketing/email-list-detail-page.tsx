@@ -4,11 +4,14 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { useSession } from "next-auth/react";
 import { useRef, useState } from "react";
-import { ChevronDown, Download, ExternalLink, Eye, Upload } from "lucide-react";
+import { ChevronDown, Download, ExternalLink, Upload } from "lucide-react";
 import { useAppDialog } from "@/contexts/app-dialog-context";
 import { apiFetch, apiFetchBlob } from "@/lib/api";
 import { sessionQueryUserKey } from "@/lib/session-query-scope";
 import { DrTableMeter, NicheTablePill } from "@/components/table-status-badges";
+import { DataTableRowMenu, type RowMenuItem } from "@/components/data-table-row-menu";
+import { TrafficSparkline } from "@/components/traffic-sparkline";
+import { iso2ToFlagEmoji } from "@/lib/flag-emoji";
 import { countryShortLabel, nicheFirstWord } from "@/lib/vendor-table-display";
 
 type Item = {
@@ -27,18 +30,32 @@ type Item = {
 type VendorRow = { id: string; companyName: string; siteUrl: string };
 type ClientRow = { id: string; companyName: string; siteUrl: string };
 
-function listCountryCodes(raw: string): string {
-  if (!raw?.trim()) return "—";
-  return raw
+function ListCountryFlagsCell({ raw }: { raw: string }) {
+  if (!raw?.trim()) return <span className="text-slate-400">—</span>;
+  const segs = raw
     .split(/[;,]+/)
     .map((s) => s.trim())
-    .filter(Boolean)
-    .map((seg) => {
-      const up = seg.toUpperCase();
-      if (/^[A-Z]{2}$/.test(up)) return countryShortLabel(up);
-      return seg;
-    })
-    .join(", ");
+    .filter(Boolean);
+  return (
+    <div className="inline-flex max-w-full flex-wrap items-center justify-center gap-x-1.5 gap-y-0.5">
+      {segs.map((seg, i) => {
+        const up = seg.toUpperCase();
+        const isIso2 = /^[A-Z]{2}$/.test(up);
+        const label = isIso2 ? countryShortLabel(up) : seg;
+        const flag = isIso2 ? iso2ToFlagEmoji(up) : "";
+        return (
+          <span key={i} className="inline-flex items-center gap-0.5" title={seg}>
+            {flag ? (
+              <span className="text-[14px] leading-none" aria-hidden>
+                {flag}
+              </span>
+            ) : null}
+            <span className="text-[10px] font-medium text-slate-700 dark:text-slate-200">{label}</span>
+          </span>
+        );
+      })}
+    </div>
+  );
 }
 
 export function EmailListDetailPage({ listId }: { listId: string }) {
@@ -333,7 +350,7 @@ export function EmailListDetailPage({ listId }: { listId: string }) {
                 <th className="p-2.5">Country</th>
                 <th className="p-2.5">Traffic</th>
                 <th className="p-2.5">DR</th>
-                <th className="p-2.5">View</th>
+                <th className="p-2.5">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -380,21 +397,25 @@ export function EmailListDetailPage({ listId }: { listId: string }) {
                   <td className="data-table-td max-w-[8rem]" title={it.niche || ""}>
                     <NicheTablePill text={nicheFirstWord(it.niche?.split(/[;]/)[0])} />
                   </td>
-                  <td className="data-table-td max-w-[7rem] truncate" title={it.country || ""}>
-                    {listCountryCodes(it.country)}
+                  <td className="data-table-td max-w-[9rem]" title={it.country || ""}>
+                    <ListCountryFlagsCell raw={it.country} />
                   </td>
-                  <td className="data-table-td tabular-nums">{it.traffic.toLocaleString()}</td>
+                  <td className="data-table-td">
+                    <div className="inline-flex min-w-0 items-center justify-center gap-1.5 tabular-nums">
+                      <TrafficSparkline value={it.traffic} seed={it.id} />
+                      <span>{it.traffic.toLocaleString()}</span>
+                    </div>
+                  </td>
                   <td className="data-table-td">
                     <DrTableMeter dr={it.dr} />
                   </td>
-                  <td className="data-table-td">
-                    <button
-                      type="button"
-                      className="inline-flex text-cyan-600 hover:underline dark:text-cyan-400"
-                      onClick={() => setView(it)}
-                    >
-                      <Eye className="inline h-4 w-4" />
-                    </button>
+                  <td className="data-table-td whitespace-nowrap">
+                    <DataTableRowMenu
+                      a11yLabel="Row actions"
+                      items={[
+                        { key: "v", type: "button", label: "View", onClick: () => setView(it) },
+                      ] satisfies RowMenuItem[]}
+                    />
                   </td>
                 </tr>
               ))}

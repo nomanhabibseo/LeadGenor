@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useSession } from "next-auth/react";
 import { RotateCcw } from "lucide-react";
 import { apiFetch } from "@/lib/api";
+import { invalidateTemplateRelatedQueries } from "@/lib/invalidate-template-queries";
 import { sessionQueryUserKey } from "@/lib/session-query-scope";
 
 type Folder = {
@@ -32,10 +33,7 @@ export function EmailTemplatesTrashPage() {
         method: "POST",
         body: JSON.stringify({}),
       }),
-    onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: ["template-folders-trash", userKey] });
-      void qc.invalidateQueries({ queryKey: ["template-folders", userKey] });
-    },
+    onSuccess: () => void invalidateTemplateRelatedQueries(qc, userKey),
   });
 
   if (status !== "authenticated" || !token) {
@@ -67,7 +65,7 @@ export function EmailTemplatesTrashPage() {
           {rows.map((r) => (
             <li
               key={r.id}
-              className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-200 bg-white px-4 py-3 dark:border-slate-600 dark:bg-slate-800/65"
+              className="em-surface-hover flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-200 bg-white px-4 py-3 dark:border-slate-600 dark:bg-slate-800/65"
             >
               <div>
                 <div className="font-semibold text-slate-900 dark:text-white">{r.name}</div>

@@ -8,6 +8,7 @@ import { useEffect, useRef, useState } from "react";
 import { Code2, Loader2 } from "lucide-react";
 import { useAppDialog } from "@/contexts/app-dialog-context";
 import { apiFetch } from "@/lib/api";
+import { invalidateTemplateRelatedQueries } from "@/lib/invalidate-template-queries";
 import { sessionQueryUserKey } from "@/lib/session-query-scope";
 import { MERGE_FIELDS } from "@/lib/merge-fields";
 import { buildInlineUnsubscribeAnchorSnippet } from "@/lib/email-template-unsub";
@@ -51,20 +52,23 @@ export function EmailNewTemplatePage() {
     setName("");
     setSubject("");
     setBody("");
-    setNewFolderName("");
     const params = new URLSearchParams(searchKey);
     const fid = params.get("folderId");
+    const pendingFolder = params.get("newFolderName");
     if (fid) {
       setFolderMode("existing");
       setFolderId(fid);
     } else {
       setFolderId("");
     }
+    if (!pendingFolder) setNewFolderName("");
   }, [searchKey]);
 
   useEffect(() => {
+    if (searchParams.get("newFolderName")) return;
+    if (searchParams.get("folderId")) return;
     if (folders.length && !folderId) setFolderId(folders[0].id);
-  }, [folders, folderId]);
+  }, [folders, folderId, searchParams]);
 
   const createFolder = useMutation({
     mutationFn: (n: string) =>
@@ -147,11 +151,22 @@ export function EmailNewTemplatePage() {
       void showAlert("Template name is required.");
       return;
     }
+    if (!subject.trim() || !body.trim()) {
+      void showAlert("Subject and body are required.");
+      return;
+    }
     setSaving(true);
     try {
-      const locked = searchParams.get("folderId");
-      let fid = locked ?? folderId;
-      if (!locked && folderMode === "new") {
+      const urlNewFolder = searchParams.get("newFolderName")?.trim();
+      const urlFolderId = searchParams.get("folderId");
+      let fid: string | undefined;
+      if (urlNewFolder) {
+        const f = await createFolder.mutateAsync(urlNewFolder);
+        fid = f.id;
+        await invalidateTemplateRelatedQueries(qc, userKey, { folderId: fid });
+      } else if (urlFolderId) {
+        fid = urlFolderId;
+      } else if (folderMode === "new") {
         const fn = newFolderName.trim();
         if (!fn) {
           void showAlert("Enter a new folder name or choose an existing folder.");
@@ -160,8 +175,11 @@ export function EmailNewTemplatePage() {
         }
         const f = await createFolder.mutateAsync(fn);
         fid = f.id;
-        void qc.invalidateQueries({ queryKey: ["template-folders", userKey] });
-      } else if (!fid) {
+        await invalidateTemplateRelatedQueries(qc, userKey, { folderId: fid });
+      } else if (folderId) {
+        fid = folderId;
+      }
+      if (!fid) {
         void showAlert("Select a folder.");
         setSaving(false);
         return;
@@ -173,7 +191,7 @@ export function EmailNewTemplatePage() {
         body,
         includeUnsubscribeBlock: false,
       });
-      void qc.invalidateQueries({ queryKey: ["template-folders", userKey] });
+      await invalidateTemplateRelatedQueries(qc, userKey, { folderId: fid });
       router.push(`/email-marketing/templates/edit/${created.id}`);
       router.refresh();
     } catch {
@@ -197,11 +215,18 @@ export function EmailNewTemplatePage() {
     );
   }
 
-  const folderLocked = Boolean(searchParams.get("folderId"));
-  const lockedFolderName = folderLocked ? folders.find((f) => f.id === folderId)?.name : undefined;
+  const urlFolderIdQ = searchParams.get("folderId");
+  const urlNewFolderQ = searchParams.get("newFolderName");
+  const folderLocked = Boolean(urlFolderIdQ || urlNewFolderQ);
+  const lockedFolderName = urlNewFolderQ
+    ? urlNewFolderQ
+    : urlFolderIdQ
+      ? folders.find((f) => f.id === urlFolderIdQ)?.name
+      : undefined;
+  const formComplete = Boolean(name.trim() && subject.trim() && body.trim());
 
   return (
-    <div className="mx-auto max-w-3xl pb-24">
+    <div className="mx-auto max-w-3xl pb-28">
       <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl font-bold text-slate-900 dark:text-white">New template</h1>
         <Link href="/email-marketing/templates" className="text-sm text-emerald-600 hover:underline dark:text-emerald-400">
@@ -211,9 +236,14 @@ export function EmailNewTemplatePage() {
 
       <div className="email-template-form space-y-5">
         {folderLocked ? (
-          <p className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700 dark:border-slate-600 dark:bg-slate-800/60 dark:text-slate-200">
-            Folder: <span className="font-semibold">{lockedFolderName ?? "…"}</span>
-          </p>
+          <section className="rounded-2xl border border-slate-200 bg-slate-50/90 px-4 py-3 dark:border-slate-600 dark:bg-slate-800/60">
+            <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
+              {urlNewFolderQ ? "New folder" : "Folder"} (saved with template when you click Save)
+            </p>
+            <p className="mt-0.5 text-sm font-semibold text-slate-900 dark:text-slate-100" aria-readonly>
+              {lockedFolderName ?? "…"}
+            </p>
+          </section>
         ) : (
           <section className="rounded-2xl border border-slate-200 bg-white p-6 dark:border-slate-700 dark:bg-slate-800/65">
             <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-100">Folder</h2>
@@ -358,15 +388,27 @@ export function EmailNewTemplatePage() {
           </div>
         </div>
 
-        <button
-          type="button"
-          className="btn-save-primary inline-flex items-center gap-2"
-          disabled={saving || createFolder.isPending || createTemplate.isPending}
-          onClick={() => void submit()}
-        >
-          {saving || createFolder.isPending || createTemplate.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-          Create template
-        </button>
+        <div className="flex flex-wrap items-center justify-end gap-3 pt-2">
+          <button
+            type="button"
+            className="text-sm font-medium text-slate-600 transition hover:text-slate-900 hover:underline dark:text-slate-400 dark:hover:text-slate-100"
+            onClick={() => router.push("/email-marketing/templates")}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="btn-save-primary inline-flex items-center gap-2"
+            disabled={saving || createFolder.isPending || createTemplate.isPending || !formComplete}
+            title={!formComplete ? "Fill template name, subject, and body to save." : undefined}
+            onClick={() => void submit()}
+          >
+            {saving || createFolder.isPending || createTemplate.isPending ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : null}
+            Save
+          </button>
+        </div>
 
       {unsubCardOpen ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">

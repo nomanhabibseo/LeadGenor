@@ -13,6 +13,7 @@ import {
 import { SmtpEncryption } from '@prisma/client';
 import { Type } from 'class-transformer';
 import {
+  IsBoolean,
   IsEmail,
   IsEnum,
   IsInt,
@@ -187,6 +188,10 @@ class UpdateAccountDto {
   @IsOptional()
   @IsEnum(SmtpEncryption)
   imapEncryption?: SmtpEncryption;
+
+  @IsOptional()
+  @IsBoolean()
+  campaignsEnabled?: boolean;
 }
 
 class VerifyOnlyDto {

@@ -90,7 +90,9 @@ export class EmailTemplatesService {
     const folders = await this.prisma.templateFolder.findMany({
       where,
       orderBy: { name: 'asc' },
-      include: { _count: { select: { templates: true } } },
+      include: {
+        _count: { select: { templates: { where: { deletedAt: null } } } },
+      },
     });
     const activeCampaigns = await this.prisma.campaign.findMany({
       where: {

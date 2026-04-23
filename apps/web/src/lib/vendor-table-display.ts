@@ -15,10 +15,10 @@ export function countryShortLabel(code: string | undefined): string {
   return up;
 }
 
-/** Join multiple countries as short codes for table cells. */
+/** One short code for exports / CSV: first country only (no duplicate TLDs). */
 export function countriesShortList(
   countries: { country: { code?: string; name?: string } }[] | undefined,
 ): string {
   if (!countries?.length) return "—";
-  return countries.map((c) => countryShortLabel(c.country.code)).join(", ");
+  return countryShortLabel(countries[0]!.country.code);
 }

@@ -244,6 +244,8 @@ model EmailAccount {
   connectionVerifiedAt DateTime?
   /** Set when last verification failed or credentials are unusable. */
   connectionInvalid    Boolean              @default(false)
+  /** When false, account is hidden from campaign sender pickers. */
+  campaignsEnabled     Boolean              @default(true)
   createdAt            DateTime             @default(now())
   updatedAt            DateTime             @updatedAt
   deletedAt            DateTime?

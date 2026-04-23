@@ -54,7 +54,7 @@ type Campaign = {
 };
 
 type EmailList = { id: string; name: string };
-type Account = { id: string; displayName: string; tag: string };
+type Account = { id: string; displayName: string; tag: string; campaignsEnabled?: boolean };
 type Tpl = { id: string; name: string; folder: { name: string } };
 
 const STEP_LABELS = ["Basics", "Senders", "Sequence", "Follow-Ups", "Schedule", "Review"] as const;
@@ -562,6 +562,11 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
           .map((a) => `${a.displayName} (${a.tag})`)
           .join(", ");
 
+  const campaignSenderAccounts = useMemo(
+    () => accounts.filter((a) => a.campaignsEnabled !== false),
+    [accounts],
+  );
+
   const ordinal = (n: number) => {
     const labels = ["1st", "2nd", "3rd", "4th", "5th", "6th", "7th", "8th", "9th", "10th"];
     return labels[n] ?? `${n + 1}th`;
@@ -686,7 +691,7 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
             <h3 className="text-lg font-semibold text-slate-900 dark:text-white">Select sender accounts</h3>
             <p className="mt-1 text-xs text-slate-500">Names and tags for this campaign. You can pick several.</p>
             <ul className="mt-4 space-y-2">
-              {accounts.map((a) => (
+              {campaignSenderAccounts.map((a) => (
                 <li key={a.id}>
                   <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-slate-200 p-3 hover:bg-slate-50 dark:border-slate-600 dark:hover:bg-slate-800/60">
                     <input

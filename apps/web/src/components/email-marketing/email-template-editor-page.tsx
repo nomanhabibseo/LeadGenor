@@ -7,6 +7,7 @@ import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { Code2, Eye, Trash2 } from "lucide-react";
 import { useAppDialog } from "@/contexts/app-dialog-context";
 import { apiFetch } from "@/lib/api";
+import { invalidateTemplateRelatedQueries } from "@/lib/invalidate-template-queries";
 import { sessionQueryUserKey } from "@/lib/session-query-scope";
 import { MERGE_FIELDS } from "@/lib/merge-fields";
 import { applyMergePreview, sampleMergeVars } from "@/lib/merge-preview";
@@ -94,9 +95,9 @@ export function EmailTemplateEditorPage({ templateId }: { templateId: string }) 
   const remove = useMutation({
     mutationFn: () =>
       apiFetch(`/email-marketing/templates/items/${templateId}`, token, { method: "DELETE" }),
-    onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: ["template-folders", userKey] });
-      const fid = tpl?.folder?.id;
+    onSuccess: async () => {
+      const fid = tpl?.folder?.id ?? null;
+      await invalidateTemplateRelatedQueries(qc, userKey, { folderId: fid, templateId });
       if (fid) router.push(`/email-marketing/templates/folder/${fid}`);
       else router.push("/email-marketing/templates");
     },

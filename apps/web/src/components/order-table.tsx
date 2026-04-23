@@ -4,15 +4,16 @@ import Link from "next/link";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSession } from "next-auth/react";
 import { useCallback, useMemo, useRef, useState } from "react";
-import { CalendarRange, ExternalLink, Eye, Pencil, Plus, RotateCcw, Trash2 } from "lucide-react";
+import { CalendarRange, ExternalLink, Plus } from "lucide-react";
 import { useAppDialog } from "@/contexts/app-dialog-context";
 import { apiFetch, apiUrl } from "@/lib/api";
 import { ExportFormatMenu, type ExportChunk } from "@/components/export-format-menu";
 import { TablePagination } from "@/components/table-pagination";
 import { OrderStatusTablePill } from "@/components/table-status-badges";
+import { DataTableRowMenu, type RowMenuItem } from "@/components/data-table-row-menu";
 import { cn } from "@/lib/utils";
 
-const PAGE_SIZE = 50;
+const DEFAULT_LIST_LIMIT = 20;
 
 type OrderRow = {
   id: string;
@@ -56,6 +57,7 @@ function buildOrdersUrl(
   searchUrl: string,
   dateFrom: string,
   dateTo: string,
+  listLimit: number,
 ) {
   const qs = new URLSearchParams();
   const scopeParam =
@@ -68,7 +70,7 @@ function buildOrdersUrl(
           : "all";
   qs.set("scope", scopeParam);
   qs.set("page", String(page));
-  qs.set("limit", String(PAGE_SIZE));
+  qs.set("limit", String(listLimit));
   if (searchUrl.trim()) qs.set("searchUrl", searchUrl.trim());
   if (dateFrom.trim()) qs.set("dateFrom", dateFrom.trim());
   if (dateTo.trim()) qs.set("dateTo", dateTo.trim());
@@ -88,6 +90,7 @@ export function OrderTable({
   const { showAlert, showConfirm } = useAppDialog();
   const [searchUrl, setSearchUrl] = useState("");
   const [page, setPage] = useState(1);
+  const listLimit = DEFAULT_LIST_LIMIT;
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [dateOpen, setDateOpen] = useState(false);
   const [draftFrom, setDraftFrom] = useState("");
@@ -101,12 +104,12 @@ export function OrderTable({
   const isTrash = scope === "trash";
 
   const listUrl = useMemo(
-    () => buildOrdersUrl(scope, page, searchUrl, appliedFrom, appliedTo),
-    [scope, page, searchUrl, appliedFrom, appliedTo],
+    () => buildOrdersUrl(scope, page, searchUrl, appliedFrom, appliedTo, listLimit),
+    [scope, page, searchUrl, appliedFrom, appliedTo, listLimit],
   );
 
   const { data, isLoading } = useQuery({
-    queryKey: ["orders", scope, page, searchUrl, appliedFrom, appliedTo],
+    queryKey: ["orders", scope, page, listLimit, searchUrl, appliedFrom, appliedTo],
     queryFn: () =>
       apiFetch<{
         data: OrderRow[];
@@ -125,7 +128,7 @@ export function OrderTable({
 
   const rows = useMemo(() => data?.data ?? [], [data?.data]);
   const total = data?.total ?? 0;
-  const limit = data?.limit ?? PAGE_SIZE;
+  const limit = data?.limit ?? listLimit;
   const totalPages = Math.max(1, Math.ceil(total / limit));
   const from = total === 0 ? 0 : (page - 1) * limit + 1;
   const to = Math.min(page * limit, total);
@@ -356,7 +359,7 @@ export function OrderTable({
       <div className="mt-4 space-y-3 text-xs text-slate-600 dark:text-slate-400">
         <p>
           <span className="text-[11px] font-medium">
-            {from}–{to} of {total}
+            {from} - {to} of {total}
           </span>
           {selected.size > 0 ? ` — ${selected.size} selected` : ""}
         </p>
@@ -588,53 +591,32 @@ export function OrderTable({
                     {String(r.orderDate).slice(0, 10)}
                   </td>
                   <td className="data-table-td whitespace-nowrap">
-                    <div className="inline-flex flex-nowrap items-center justify-center gap-1">
-                      {!isTrash ? (
-                        <>
-                          <Link
-                            href={`/orders/${r.id}`}
-                            className="inline-flex rounded p-1.5 text-slate-600 hover:bg-slate-100 hover:text-sky-600 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-sky-400"
-                            title="View"
-                          >
-                            <Eye className="h-4 w-4" />
-                          </Link>
-                          <Link
-                            href={`/orders/${r.id}/edit`}
-                            className="inline-flex rounded p-1.5 text-slate-600 hover:bg-slate-100 hover:text-sky-600 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-sky-400"
-                            title="Edit"
-                          >
-                            <Pencil className="h-4 w-4" />
-                          </Link>
-                          <button
-                            type="button"
-                            className="inline-flex rounded p-1.5 text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/40"
-                            title="Delete"
-                            onClick={() => void softDeleteOrder(r.id)}
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </button>
-                        </>
-                      ) : (
-                        <>
-                          <button
-                            type="button"
-                            className="inline-flex rounded p-1.5 text-sky-600 hover:bg-slate-100 dark:text-sky-400 dark:hover:bg-slate-800"
-                            title="Restore"
-                            onClick={() => void restoreOrder(r.id)}
-                          >
-                            <RotateCcw className="h-4 w-4" />
-                          </button>
-                          <button
-                            type="button"
-                            className="inline-flex rounded p-1.5 text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/40"
-                            title="Delete permanently"
-                            onClick={() => void permanentDeleteOrder(r.id)}
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </button>
-                        </>
-                      )}
-                    </div>
+                    <DataTableRowMenu
+                      items={
+                        !isTrash
+                          ? ([
+                              { key: "v", type: "link", label: "View", href: `/orders/${r.id}` },
+                              { key: "e", type: "link", label: "Edit", href: `/orders/${r.id}/edit` },
+                              {
+                                key: "d",
+                                type: "button",
+                                label: "Delete",
+                                danger: true,
+                                onClick: () => void softDeleteOrder(r.id),
+                              },
+                            ] satisfies RowMenuItem[])
+                          : ([
+                              { key: "r", type: "button", label: "Restore", onClick: () => void restoreOrder(r.id) },
+                              {
+                                key: "p",
+                                type: "button",
+                                label: "Delete permanently",
+                                danger: true,
+                                onClick: () => void permanentDeleteOrder(r.id),
+                              },
+                            ] satisfies RowMenuItem[])
+                      }
+                    />
                   </td>
                 </tr>
               );
@@ -646,9 +628,9 @@ export function OrderTable({
       <TablePagination
         page={page}
         totalPages={totalPages}
-        total={total}
         limit={limit}
         onPageChange={setPage}
+        showLimitSelect={false}
       />
     </div>
   );

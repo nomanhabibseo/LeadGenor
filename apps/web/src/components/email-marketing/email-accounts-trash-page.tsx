@@ -64,7 +64,7 @@ export function EmailAccountsTrashPage() {
           {rows.map((r) => (
             <li
               key={r.id}
-              className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-200 bg-white px-4 py-3 dark:border-slate-600 dark:bg-slate-800/65"
+              className="em-surface-hover flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-200 bg-white px-4 py-3 dark:border-slate-600 dark:bg-slate-800/65"
             >
               <div>
                 <div className="font-semibold text-slate-900 dark:text-white">{r.displayName}</div>

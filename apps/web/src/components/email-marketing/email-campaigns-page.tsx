@@ -3,18 +3,35 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { useSession } from "next-auth/react";
-import { useState } from "react";
-import { Eye, Loader2, Pause, Pencil, Play, Trash2 } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import {
+  Clock,
+  Eye,
+  LayoutList,
+  Loader2,
+  Pencil,
+  Play,
+  Search,
+  Send,
+  ListFilter,
+  MailOpen,
+  Reply,
+  Pause,
+  User,
+  Trash2,
+} from "lucide-react";
 import { useAppDialog } from "@/contexts/app-dialog-context";
 import { apiFetch } from "@/lib/api";
 import { sessionQueryUserKey } from "@/lib/session-query-scope";
 import { cn } from "@/lib/utils";
+import { TablePagination } from "@/components/table-pagination";
 
 type Camp = {
   id: string;
   name: string;
   status: string;
   createdAt: string;
+  updatedAt: string;
   pauseReason?: string | null;
   startedAt?: string | null;
   completedAt?: string | null;
@@ -22,12 +39,42 @@ type Camp = {
   _count: { recipients: number };
   sentRecipients: number;
   remainingRecipients: number;
+  openedRecipients: number;
+  repliedRecipients: number;
+  openRatePct: number;
+  replyRatePct: number;
+  senderAccountNames: string[];
 };
+
+const SENDER_CHIPS_MAX = 3;
+const CAMPAIGNS_PAGE_SIZE = 20;
+
+function SenderAccountChips({ names }: { names: string[] }) {
+  if (!names.length) {
+    return <span className="text-[10px] text-slate-400 dark:text-slate-500">—</span>;
+  }
+  const shown = names.slice(0, SENDER_CHIPS_MAX);
+  const more = names.length > SENDER_CHIPS_MAX;
+  return (
+    <div className="flex min-w-0 flex-wrap items-center gap-1">
+      {shown.map((n, i) => (
+        <span
+          key={`${n}-${i}`}
+          className="max-w-[6.5rem] truncate rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[10px] font-medium text-slate-700 dark:border-slate-600 dark:bg-slate-800/80 dark:text-slate-200"
+          title={n}
+        >
+          {n}
+        </span>
+      ))}
+      {more ? <span className="shrink-0 text-[11px] font-medium text-slate-500 dark:text-slate-400">…</span> : null}
+    </div>
+  );
+}
 
 function statusLabel(status: string) {
   switch (status) {
     case "RUNNING":
-      return "Active";
+      return "Running";
     case "PAUSED":
       return "Paused";
     case "DRAFT":
@@ -45,22 +92,76 @@ function CampaignStatusPill({ status }: { status: string }) {
   const label = statusLabel(status);
   if (status === "COMPLETED") {
     return (
-      <span className="inline-flex items-center justify-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-0.5 text-[11px] font-medium text-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-100">
-        <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-600 dark:bg-emerald-400" aria-hidden />
-        {label}
-      </span>
+      <div className="flex flex-col items-center gap-0 text-center">
+        <span className="text-[9px] font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">Status</span>
+        <span className="inline-flex items-center justify-center gap-1 rounded-full bg-emerald-50 px-2 py-px text-[10px] font-medium text-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-100">
+          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-600 dark:bg-emerald-400" aria-hidden />
+          {label}
+        </span>
+      </div>
     );
   }
-  const palette =
-    status === "RUNNING" || status === "SCHEDULED"
-      ? "bg-sky-50 text-sky-900 dark:bg-sky-950/40 dark:text-sky-100"
-      : status === "PAUSED"
-        ? "bg-amber-50 text-amber-950 dark:bg-amber-950/35 dark:text-amber-100"
-        : "bg-slate-100 text-slate-800 dark:bg-slate-800 dark:text-slate-200";
+  if (status === "SCHEDULED") {
+    return (
+      <div className="flex flex-col items-center gap-0 text-center">
+        <span className="text-[9px] font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">Status</span>
+        <span className="inline-flex items-center justify-center gap-1 rounded-full bg-amber-50 px-2 py-px text-[10px] font-medium text-amber-900 dark:bg-amber-950/50 dark:text-amber-100">
+          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500" aria-hidden />
+          {label}
+        </span>
+      </div>
+    );
+  }
+  if (status === "DRAFT") {
+    return (
+      <div className="flex flex-col items-center gap-0 text-center">
+        <span className="text-[9px] font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">Status</span>
+        <span className="inline-flex items-center justify-center gap-1 rounded-full bg-slate-100 px-2 py-px text-[10px] font-medium text-slate-800 dark:bg-slate-800 dark:text-slate-200">
+          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-slate-400" aria-hidden />
+          {label}
+        </span>
+      </div>
+    );
+  }
+  if (status === "PAUSED") {
+    return (
+      <div className="flex flex-col items-center gap-0 text-center">
+        <span className="text-[9px] font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">Status</span>
+        <span className="inline-flex items-center justify-center gap-1 rounded-full bg-amber-50 px-2 py-px text-[10px] font-medium text-amber-950 dark:bg-amber-950/35 dark:text-amber-100">
+          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500" aria-hidden />
+          {label}
+        </span>
+      </div>
+    );
+  }
+  if (status === "RUNNING") {
+    return (
+      <div className="flex flex-col items-center gap-0 text-center">
+        <span className="text-[9px] font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">Status</span>
+        <span className="inline-flex items-center justify-center gap-1 rounded-full bg-sky-50 px-2 py-px text-[10px] font-medium text-sky-900 dark:bg-sky-950/40 dark:text-sky-100">
+          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-sky-500" aria-hidden />
+          {label}
+        </span>
+      </div>
+    );
+  }
   return (
-    <span className={cn("inline-flex rounded-full px-2.5 py-0.5 text-[11px] font-medium", palette)}>{label}</span>
+    <div className="flex flex-col items-center gap-0 text-center">
+      <span className="text-[9px] font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">Status</span>
+      <span className="inline-flex items-center justify-center gap-1 rounded-full bg-slate-100 px-2 py-px text-[10px] font-medium text-slate-800 dark:bg-slate-800 dark:text-slate-200">
+        {label}
+      </span>
+    </div>
   );
 }
+
+const STATUS_FILTERS = ["all", "DRAFT", "SCHEDULED", "RUNNING", "PAUSED", "COMPLETED"] as const;
+type StatusFilter = (typeof STATUS_FILTERS)[number];
+
+const SORTS = [
+  { id: "recent" as const, label: "Recent" },
+  { id: "name" as const, label: "Name (A–Z)" },
+] as const;
 
 export function EmailCampaignsPage() {
   const { data: session, status } = useSession();
@@ -68,15 +169,55 @@ export function EmailCampaignsPage() {
   const userKey = sessionQueryUserKey(session);
   const qc = useQueryClient();
   const { showAlert, showConfirm } = useAppDialog();
-  const [pauseFor, setPauseFor] = useState<Camp | null>(null);
-  const [pauseReasonInput, setPauseReasonInput] = useState("");
   const [deletedNote, setDeletedNote] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [sortBy, setSortBy] = useState<"recent" | "name">("recent");
+  const [listPage, setListPage] = useState(1);
 
   const { data: rows = [], isError, error, refetch, isFetching } = useQuery({
     queryKey: ["campaigns", userKey],
     queryFn: () => apiFetch<Camp[]>("/email-marketing/campaigns", token),
     enabled: status === "authenticated" && !!token && !!userKey,
+    refetchOnWindowFocus: true,
+    refetchInterval: (q) => {
+      const data = q.state.data as Camp[] | undefined;
+      if (data?.some((c) => c.status === "RUNNING" || c.status === "SCHEDULED")) return 10_000;
+      return false;
+    },
   });
+
+  const displayRows = useMemo(() => {
+    let list = rows.slice();
+    const q = search.trim().toLowerCase();
+    if (q) {
+      list = list.filter((c) => {
+        const senderHit = (c.senderAccountNames ?? []).some((n) => n.toLowerCase().includes(q));
+        return c.name.toLowerCase().includes(q) || c.emailList.name.toLowerCase().includes(q) || senderHit;
+      });
+    }
+    if (statusFilter !== "all") {
+      list = list.filter((c) => c.status === statusFilter);
+    }
+    list.sort((a, b) => {
+      if (sortBy === "name") return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+      return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
+    });
+    return list;
+  }, [rows, search, statusFilter, sortBy]);
+
+  useEffect(() => {
+    setListPage(1);
+  }, [search, statusFilter, sortBy]);
+
+  const listTotal = displayRows.length;
+  const totalListPages = Math.max(1, Math.ceil(listTotal / CAMPAIGNS_PAGE_SIZE));
+  const pagedRows = useMemo(() => {
+    const start = (listPage - 1) * CAMPAIGNS_PAGE_SIZE;
+    return displayRows.slice(start, start + CAMPAIGNS_PAGE_SIZE);
+  }, [displayRows, listPage]);
+  const rangeFrom = listTotal === 0 ? 0 : (listPage - 1) * CAMPAIGNS_PAGE_SIZE + 1;
+  const rangeTo = Math.min(listPage * CAMPAIGNS_PAGE_SIZE, listTotal);
 
   const start = useMutation({
     mutationFn: ({ id, skipRecipientBuild }: { id: string; skipRecipientBuild: boolean }) =>
@@ -89,16 +230,12 @@ export function EmailCampaignsPage() {
   });
 
   const pause = useMutation({
-    mutationFn: ({ id, reason }: { id: string; reason: string }) =>
+    mutationFn: (id: string) =>
       apiFetch(`/email-marketing/campaigns/${id}/pause`, token, {
         method: "POST",
-        body: JSON.stringify({ reason }),
+        body: JSON.stringify({}),
       }),
-    onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: ["campaigns", userKey] });
-      setPauseFor(null);
-      setPauseReasonInput("");
-    },
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ["campaigns", userKey] }),
     onError: (e: Error) => void showAlert(e.message),
   });
 
@@ -111,13 +248,40 @@ export function EmailCampaignsPage() {
       qc.setQueryData<Camp[]>(["campaigns", userKey], (old) => (old ?? []).filter((c) => c.id !== id));
       return { prev };
     },
-    onError: (_e, _id, ctx) => {
+    onError: (e, _id, ctx) => {
       if (ctx?.prev !== undefined) qc.setQueryData(["campaigns", userKey], ctx.prev);
+      void showAlert(e instanceof Error ? e.message : "Could not delete campaign.");
     },
     onSettled: () => void qc.invalidateQueries({ queryKey: ["campaigns", userKey] }),
   });
 
-  async function confirmDeleteCampaign(c: Camp) {
+  async function onPause(c: Camp) {
+    const ok = await showConfirm(
+      [
+        "Do you want to pause this campaign?",
+        "",
+        "If you confirm, sending will stop and no further campaign emails will go out until you resume.",
+        "Pausing can also break follow-up timing or sequencing for recipients who were mid-sequence.",
+      ].join("\n"),
+    );
+    if (!ok) return;
+    await pause.mutateAsync(c.id);
+  }
+
+  function onEditClick(e: React.MouseEvent, c: Camp) {
+    if (c.status === "RUNNING") {
+      e.preventDefault();
+      void showAlert(
+        "You cannot edit a campaign while it is running. Pause the campaign first, then you can make changes.",
+      );
+    }
+  }
+
+  async function onDeleteClick(c: Camp) {
+    if (c.status === "RUNNING") {
+      await showAlert("You cannot delete a campaign while it is running. Pause the campaign first, then you can delete it.");
+      return;
+    }
     if (!(await showConfirm(`Delete campaign “${c.name}”? This cannot be undone.`))) return;
     await remove.mutateAsync(c.id);
     setDeletedNote(`Campaign “${c.name}” was deleted.`);
@@ -151,19 +315,14 @@ export function EmailCampaignsPage() {
         </div>
       ) : null}
 
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex min-w-0 flex-wrap items-center gap-3">
-          <h1 className="text-2xl font-bold text-slate-900 dark:text-white">Campaigns</h1>
-          {isFetching && !isError ? (
-            <span className="inline-flex items-center gap-1 text-xs text-cyan-600">
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              Refreshing…
-            </span>
-          ) : null}
-        </div>
-        <Link href="/email-marketing/campaigns/new" className="em-btn-primary inline-flex items-center gap-2">
-          + New campaign
-        </Link>
+      <div className="flex min-w-0 flex-wrap items-center gap-3">
+        <h1 className="text-2xl font-bold text-slate-900 dark:text-white">Campaigns</h1>
+        {isFetching && !isError ? (
+          <span className="inline-flex items-center gap-1 text-xs text-cyan-600 dark:text-cyan-400">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            Refreshing…
+          </span>
+        ) : null}
       </div>
 
       {deletedNote ? (
@@ -172,140 +331,257 @@ export function EmailCampaignsPage() {
         </div>
       ) : null}
 
-      {pauseFor ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl dark:bg-slate-800">
-            <h2 className="text-lg font-semibold text-slate-900 dark:text-white">Pause campaign</h2>
-            <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">Optionally tell us why you are pausing.</p>
-            <textarea
-              className="mt-3 w-full rounded-lg border border-slate-200 p-2 text-sm dark:border-slate-600 dark:bg-slate-800"
-              rows={3}
-              value={pauseReasonInput}
-              onChange={(e) => setPauseReasonInput(e.target.value)}
-              placeholder="Reason (optional)"
-            />
-            <div className="mt-4 flex justify-end gap-2">
-              <button type="button" className="rounded-lg border px-3 py-2 text-sm" onClick={() => setPauseFor(null)}>
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="em-btn-primary inline-flex items-center gap-2"
-                disabled={pause.isPending}
-                onClick={() => void pause.mutateAsync({ id: pauseFor.id, reason: pauseReasonInput })}
-              >
-                {pause.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-                Pause
-              </button>
-            </div>
-          </div>
+      <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
+        <div className="relative min-w-0 flex-1 sm:max-w-md">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+          <input
+            type="search"
+            className="w-full rounded-xl border border-slate-200 bg-white py-2.5 pl-9 pr-3 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 dark:border-slate-600 dark:bg-slate-800 dark:text-white"
+            placeholder="Search campaigns…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            autoComplete="off"
+          />
         </div>
-      ) : null}
-
-      <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-700 dark:bg-slate-800/65">
-        <table className="w-full text-center text-[11px]">
-          <thead className="em-table-thead">
-            <tr>
-              <th className="px-3 py-3">Campaign name</th>
-              <th className="px-3 py-3">Target list</th>
-              <th className="px-3 py-3">Date created</th>
-              <th className="px-3 py-3">Status</th>
-              <th className="px-3 py-3">Sent</th>
-              <th className="px-3 py-3">Pending</th>
-              <th className="px-3 py-3">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((c) => (
-              <tr key={c.id} className="border-b border-slate-100 hover:bg-slate-50/90 dark:border-slate-800 dark:hover:bg-slate-800/40">
-                <td className="px-3 py-3 text-left align-middle text-[11px] font-medium text-slate-900 dark:text-white">
-                  {c.name}
-                </td>
-                <td className="px-3 py-3 align-middle">
-                  <span className="inline-flex max-w-[12rem] truncate rounded-full bg-indigo-50 px-2.5 py-0.5 text-[11px] font-medium text-indigo-800 dark:bg-indigo-950/50 dark:text-indigo-200">
-                    {c.emailList.name}
-                  </span>
-                </td>
-                <td className="px-3 py-3 align-middle text-[11px] text-slate-600 dark:text-slate-400">
-                  {new Date(c.createdAt).toLocaleString()}
-                </td>
-                <td className="px-3 py-3 align-middle">
-                  <div className="flex flex-col items-center gap-0.5">
-                    <CampaignStatusPill status={c.status} />
-                    {c.status === "PAUSED" && c.pauseReason ? (
-                      <span className="max-w-[10rem] text-[10px] text-slate-500">Reason: {c.pauseReason}</span>
-                    ) : null}
-                  </div>
-                </td>
-                <td className="px-3 py-3 align-middle tabular-nums text-slate-800 dark:text-slate-200">
-                  {c.sentRecipients ?? 0}
-                </td>
-                <td className="px-3 py-3 align-middle tabular-nums text-slate-800 dark:text-slate-200">
-                  {c.remainingRecipients ?? 0}
-                </td>
-                <td className="px-3 py-3 align-middle">
-                  <div className="inline-flex flex-nowrap items-center justify-center gap-1.5">
-                    <Link
-                      href={`/email-marketing/campaigns/${c.id}/view`}
-                      className="inline-flex rounded p-1 text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
-                      title="View"
-                    >
-                      <Eye className="h-4 w-4" />
-                    </Link>
-                    <Link
-                      href={`/email-marketing/campaigns/${c.id}`}
-                      className="inline-flex rounded p-1 text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
-                      title="Edit"
-                    >
-                      <Pencil className="h-4 w-4" />
-                    </Link>
-                    {c.status === "RUNNING" || c.status === "SCHEDULED" ? (
-                      <button
-                        type="button"
-                        className="inline-flex rounded p-1 text-amber-700 hover:bg-amber-50 dark:text-amber-300 dark:hover:bg-amber-500/10"
-                        title="Pause"
-                        onClick={() => {
-                          setPauseReasonInput("");
-                          setPauseFor(c);
-                        }}
-                      >
-                        <Pause className="h-4 w-4" />
-                      </button>
-                    ) : null}
-                    {c.status !== "COMPLETED" && c.status !== "RUNNING" && c.status !== "SCHEDULED" ? (
-                      <button
-                        type="button"
-                        className="inline-flex items-center gap-1 rounded border border-cyan-600 px-2 py-0.5 text-xs font-medium text-cyan-700 disabled:opacity-40 dark:text-cyan-300"
-                        disabled={start.isPending}
-                        title={c.startedAt ? "Continue campaign" : "Start campaign"}
-                        onClick={() =>
-                          void start.mutateAsync({
-                            id: c.id,
-                            skipRecipientBuild: c.status === "PAUSED" && c._count.recipients > 0,
-                          })
-                        }
-                      >
-                        {start.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
-                        {c.startedAt ? "Continue" : "Start"}
-                      </button>
-                    ) : null}
-                    {c.status !== "RUNNING" ? (
-                      <button
-                        type="button"
-                        className="inline-flex rounded p-1 text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-500/10"
-                        title="Delete"
-                        onClick={() => void confirmDeleteCampaign(c)}
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </button>
-                    ) : null}
-                  </div>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <div className="flex flex-wrap items-center gap-2 sm:shrink-0 sm:ms-auto">
+          <div className="relative min-w-0 sm:min-w-[9rem]">
+            <ListFilter className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
+            <select
+              className="em-btn-outline h-9 w-full min-w-0 cursor-pointer appearance-none rounded-xl border-slate-200 py-0 pl-8 pr-3 text-sm dark:border-slate-600"
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
+            >
+              <option value="all">All status</option>
+              <option value="DRAFT">Draft</option>
+              <option value="SCHEDULED">Scheduled</option>
+              <option value="RUNNING">Running</option>
+              <option value="PAUSED">Paused</option>
+              <option value="COMPLETED">Completed</option>
+            </select>
+          </div>
+          <div className="relative min-w-0 sm:min-w-[9.5rem]">
+            <LayoutList className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
+            <select
+              className="em-btn-outline h-9 w-full min-w-0 cursor-pointer appearance-none rounded-xl border-slate-200 py-0 pl-8 pr-3 text-sm dark:border-slate-600"
+              value={sortBy}
+              onChange={(e) => setSortBy(e.target.value as "recent" | "name")}
+            >
+              {SORTS.map((s) => (
+                <option key={s.id} value={s.id}>
+                  Sort: {s.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <Link
+            href="/email-marketing/campaigns/new"
+            className="em-btn-primary inline-flex h-9 items-center justify-center gap-1.5 whitespace-nowrap px-4"
+          >
+            + New campaign
+          </Link>
+        </div>
       </div>
+
+      <p className="text-xs text-slate-500 dark:text-slate-400">
+        <span className="tabular-nums">
+          {rangeFrom} - {rangeTo} of {listTotal}
+        </span>
+      </p>
+
+      {displayRows.length === 0 ? (
+        <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50/50 px-6 py-12 text-center text-sm text-slate-600 dark:border-slate-700 dark:bg-slate-800/30 dark:text-slate-400">
+          {rows.length === 0 ? "No campaigns yet. Create your first campaign to get started." : "No campaigns match your filters."}
+        </div>
+      ) : (
+        <ul className="space-y-2">
+          {pagedRows.map((c) => {
+            const created = new Date(c.createdAt);
+            const leftAccent =
+              c.status === "COMPLETED"
+                ? "from-emerald-200/80 to-white"
+                : c.status === "SCHEDULED"
+                  ? "from-amber-200/80 to-white"
+                  : "from-indigo-200/70 to-white";
+            const senderNames = c.senderAccountNames ?? [];
+            const primaryBtn =
+              "inline-flex items-center justify-center gap-1 rounded-md border border-transparent bg-transparent px-2 py-1 text-xs font-semibold shadow-none transition-colors disabled:opacity-50";
+            return (
+              <li
+                key={c.id}
+                tabIndex={0}
+                className={cn(
+                  "group em-surface-hover overflow-hidden rounded-xl border border-slate-200/90 bg-white shadow-sm",
+                  "focus-within:outline-none dark:border-slate-700 dark:bg-slate-800/50",
+                )}
+              >
+                <div className="grid grid-cols-1 gap-2 border-b border-slate-900/[0.08] p-2.5 sm:grid-cols-[auto_minmax(0,1.15fr)_minmax(0,1fr)_minmax(7rem,auto)_1fr] sm:items-center sm:gap-3 dark:border-white/[0.1]">
+                  <div
+                    className={cn(
+                      "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br to-white ring-1 ring-slate-200/80 dark:ring-slate-600",
+                      leftAccent,
+                    )}
+                  >
+                    <Send className="h-4 w-4 text-indigo-600 dark:text-indigo-300" />
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-[9px] font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">Campaign name</p>
+                    <p className="truncate text-sm font-semibold text-slate-900 dark:text-white">{c.name}</p>
+                    <p className="mt-0.5 flex max-w-prose items-center gap-1 text-[11px] text-slate-600 dark:text-slate-400">
+                      <User className="h-3 w-3 shrink-0 text-slate-400" />
+                      <span className="truncate">List: {c.emailList.name}</span>
+                    </p>
+                  </div>
+                  <div className="min-w-0 sm:pl-1">
+                    <p className="text-[9px] font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">Sender accounts</p>
+                    <div className="mt-0.5">
+                      <SenderAccountChips names={senderNames} />
+                    </div>
+                  </div>
+                  <div className="flex justify-center justify-self-center sm:min-w-[7.5rem]">
+                    <CampaignStatusPill status={c.status} />
+                  </div>
+                  <div className="flex min-w-0 items-start justify-end gap-2 sm:ml-auto sm:min-w-0 sm:max-w-[14rem]">
+                    <div className="shrink-0 text-right">
+                      <div className="text-[9px] font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">Created</div>
+                      <div className="text-[11px] leading-tight text-slate-800 dark:text-slate-200">
+                        {created.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" })}{" "}
+                        {created.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}
+                      </div>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-0.5 pt-0.5">
+                      <Link
+                        href={`/email-marketing/campaigns/${c.id}/view`}
+                        className="inline-flex rounded-md p-1.5 text-violet-600 hover:bg-violet-100/80 dark:text-violet-300 dark:hover:bg-violet-950/50"
+                        title="Preview"
+                      >
+                        <Eye className="h-4 w-4" />
+                      </Link>
+                      <Link
+                        href={`/email-marketing/campaigns/${c.id}`}
+                        className="inline-flex rounded-md p-1.5 text-violet-600 hover:bg-violet-100/80 dark:text-violet-300 dark:hover:bg-violet-950/50"
+                        title="Edit"
+                        onClick={(e) => onEditClick(e, c)}
+                      >
+                        <Pencil className="h-4 w-4" />
+                      </Link>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex flex-col gap-3 p-2.5 sm:flex-row sm:items-stretch sm:justify-between sm:gap-4">
+                  <div className="grid min-w-0 flex-1 grid-cols-2 gap-2.5 sm:grid-cols-4 sm:gap-4">
+                    <div className="flex flex-col items-center rounded-md border border-slate-200/80 bg-slate-50/95 px-2 py-1.5 text-center dark:border-slate-600/70 dark:bg-slate-800/60">
+                      <div className="text-[8px] font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">Sent</div>
+                      <div className="mt-0.5 flex items-center gap-1">
+                        <Send className="h-3 w-3 shrink-0 text-sky-500" />
+                        <span className="text-xs font-semibold tabular-nums text-slate-900 dark:text-white">{c.sentRecipients ?? 0}</span>
+                      </div>
+                    </div>
+                    <div className="flex flex-col items-center rounded-md border border-slate-200/80 bg-slate-50/95 px-2 py-1.5 text-center dark:border-slate-600/70 dark:bg-slate-800/60">
+                      <div className="text-[8px] font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">Pending</div>
+                      <div className="mt-0.5 flex items-center gap-1">
+                        <Clock className="h-3 w-3 shrink-0 text-amber-500" />
+                        <span className="text-xs font-semibold tabular-nums text-slate-900 dark:text-white">{c.remainingRecipients ?? 0}</span>
+                      </div>
+                    </div>
+                    <div className="flex flex-col items-center rounded-md border border-slate-200/80 bg-slate-50/95 px-2 py-1.5 text-center dark:border-slate-600/70 dark:bg-slate-800/60">
+                      <div className="text-[8px] font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">Opened</div>
+                      <div className="mt-0.5 flex items-center justify-center gap-1">
+                        <MailOpen className="h-3 w-3 shrink-0 text-emerald-500" />
+                        <span className="text-xs font-semibold tabular-nums text-slate-900 dark:text-white">
+                          {c.openedRecipients ?? 0}{" "}
+                          <span className="text-[10px] font-medium text-slate-500">({(c.openRatePct ?? 0)}%)</span>
+                        </span>
+                      </div>
+                    </div>
+                    <div className="flex flex-col items-center rounded-md border border-slate-200/80 bg-slate-50/95 px-2 py-1.5 text-center dark:border-slate-600/70 dark:bg-slate-800/60">
+                      <div className="text-[8px] font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">Replied</div>
+                      <div className="mt-0.5 flex items-center justify-center gap-1">
+                        <Reply className="h-3 w-3 shrink-0 text-violet-500" />
+                        <span className="text-xs font-semibold tabular-nums text-slate-900 dark:text-white">
+                          {c.repliedRecipients ?? 0}{" "}
+                          <span className="text-[10px] font-medium text-slate-500">({(c.replyRatePct ?? 0)}%)</span>
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex shrink-0 flex-row flex-wrap items-center justify-end gap-2 self-center sm:self-end">
+                    {c.status === "DRAFT" ? (
+                        <button
+                          type="button"
+                          className={cn(
+                            primaryBtn,
+                            "text-sky-700 hover:border-sky-500 hover:bg-sky-50/80 dark:text-sky-300 dark:hover:border-sky-500 dark:hover:bg-sky-950/40",
+                          )}
+                          disabled={start.isPending}
+                          onClick={() =>
+                            void start.mutateAsync({
+                              id: c.id,
+                              skipRecipientBuild: false,
+                            })
+                          }
+                        >
+                          {start.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+                          Start
+                        </button>
+                      ) : null}
+                      {c.status === "RUNNING" ? (
+                        <button
+                          type="button"
+                          className={cn(
+                            primaryBtn,
+                            "text-amber-800 hover:border-amber-500 hover:bg-amber-50/80 dark:text-amber-200 dark:hover:border-amber-500 dark:hover:bg-amber-950/30",
+                          )}
+                          disabled={pause.isPending}
+                          onClick={() => void onPause(c)}
+                        >
+                          {pause.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Pause className="h-3.5 w-3.5" />}
+                          Pause
+                        </button>
+                      ) : null}
+                      {c.status === "PAUSED" ? (
+                        <button
+                          type="button"
+                          className={cn(
+                            primaryBtn,
+                            "text-sky-700 hover:border-sky-500 hover:bg-sky-50/80 dark:text-sky-300 dark:hover:border-sky-500 dark:hover:bg-sky-950/40",
+                          )}
+                          disabled={start.isPending}
+                          onClick={() =>
+                            void start.mutateAsync({
+                              id: c.id,
+                              skipRecipientBuild: c._count.recipients > 0,
+                            })
+                          }
+                        >
+                          {start.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+                          Resume
+                        </button>
+                      ) : null}
+                    <button
+                      type="button"
+                      className="inline-flex rounded-md p-1.5 text-red-600 hover:bg-red-50/90 dark:text-red-400 dark:hover:bg-red-950/40"
+                      title="Delete"
+                      onClick={() => void onDeleteClick(c)}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </div>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+
+      <TablePagination
+        page={listPage}
+        totalPages={totalListPages}
+        limit={CAMPAIGNS_PAGE_SIZE}
+        onPageChange={setListPage}
+        showLimitSelect={false}
+      />
     </div>
   );
 }

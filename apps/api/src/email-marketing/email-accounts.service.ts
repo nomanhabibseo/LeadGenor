@@ -298,6 +298,7 @@ export class EmailAccountsService {
       imapUser?: string | null;
       imapPassword?: string;
       imapEncryption?: SmtpEncryption;
+      campaignsEnabled?: boolean;
     }>,
   ) {
     const acc = await this.prisma.emailAccount.findFirst({
@@ -313,6 +314,7 @@ export class EmailAccountsService {
     if (dto.delayMaxSec !== undefined) data.delayMaxSec = dto.delayMaxSec;
     if (dto.signature !== undefined) data.signature = dto.signature;
     if (dto.bcc !== undefined) data.bcc = dto.bcc;
+    if (dto.campaignsEnabled !== undefined) data.campaignsEnabled = dto.campaignsEnabled;
     if (dto.smtpHost !== undefined) data.smtpHost = dto.smtpHost.trim();
     if (dto.smtpPort !== undefined) data.smtpPort = dto.smtpPort;
     if (dto.smtpUser !== undefined) data.smtpUser = dto.smtpUser.trim();

@@ -66,20 +66,47 @@ export class EmailCampaignsService {
         _count: { select: { recipients: true } },
       },
     });
-    const ids = rows.map((r) => r.id);
-    if (!ids.length) {
-      return rows.map((r) => ({ ...r, sentRecipients: 0, remainingRecipients: 0 }));
+    const campaignIds = rows.map((r) => r.id);
+    if (!campaignIds.length) {
+      return rows.map((r) => ({
+        ...r,
+        sentRecipients: 0,
+        remainingRecipients: 0,
+        openedRecipients: 0,
+        repliedRecipients: 0,
+        openRatePct: 0,
+        replyRatePct: 0,
+        senderAccountNames: [] as string[],
+      }));
     }
-    const [sentGroups, remainingGroups] = await Promise.all([
+
+    const allSenderIds = new Set<string>();
+    for (const r of rows) {
+      for (const sid of parseSenderAccountIds(r.senderAccountIds)) {
+        allSenderIds.add(sid);
+      }
+    }
+    const accountRows =
+      allSenderIds.size > 0
+        ? await this.prisma.emailAccount.findMany({
+            where: { userId, id: { in: [...allSenderIds] }, deletedAt: null },
+            select: { id: true, displayName: true },
+          })
+        : [];
+    const displayNameByAccountId = new Map(
+      accountRows.map((a) => [a.id, (a.displayName || '').trim() || a.id]),
+    );
+
+    const [sentGroups, remainingGroups, openedGroups, repliedGroups] = await Promise.all([
       this.prisma.campaignRecipient.groupBy({
         by: ['campaignId'],
-        where: { campaignId: { in: ids }, lastSentAt: { not: null } },
+        where: { campaignId: { in: campaignIds }, lastSentAt: { not: null } },
         _count: { _all: true },
       }),
       this.prisma.campaignRecipient.groupBy({
         by: ['campaignId'],
         where: {
-          campaignId: { in: ids },
+          campaignId: { in: campaignIds },
           status: {
             in: [
               CampaignRecipientStatus.PENDING,
@@ -90,14 +117,39 @@ export class EmailCampaignsService {
         },
         _count: { _all: true },
       }),
+      this.prisma.campaignRecipient.groupBy({
+        by: ['campaignId'],
+        where: { campaignId: { in: campaignIds }, opened: true },
+        _count: { _all: true },
+      }),
+      this.prisma.campaignRecipient.groupBy({
+        by: ['campaignId'],
+        where: { campaignId: { in: campaignIds }, replied: true },
+        _count: { _all: true },
+      }),
     ]);
     const sentMap = new Map(sentGroups.map((g) => [g.campaignId, g._count._all]));
     const remMap = new Map(remainingGroups.map((g) => [g.campaignId, g._count._all]));
-    return rows.map((r) => ({
-      ...r,
-      sentRecipients: sentMap.get(r.id) ?? 0,
-      remainingRecipients: remMap.get(r.id) ?? 0,
-    }));
+    const openedMap = new Map(openedGroups.map((g) => [g.campaignId, g._count._all]));
+    const repliedMap = new Map(repliedGroups.map((g) => [g.campaignId, g._count._all]));
+    return rows.map((r) => {
+      const sent = sentMap.get(r.id) ?? 0;
+      const opened = openedMap.get(r.id) ?? 0;
+      const replied = repliedMap.get(r.id) ?? 0;
+      const senderAccountNames = parseSenderAccountIds(r.senderAccountIds).map(
+        (id) => displayNameByAccountId.get(id) ?? 'Unknown account',
+      );
+      return {
+        ...r,
+        sentRecipients: sent,
+        remainingRecipients: remMap.get(r.id) ?? 0,
+        openedRecipients: opened,
+        repliedRecipients: replied,
+        openRatePct: sent > 0 ? Math.round((opened / sent) * 100) : 0,
+        replyRatePct: sent > 0 ? Math.round((replied / sent) * 100) : 0,
+        senderAccountNames,
+      };
+    });
   }
 
   async listTrash(userId: string) {

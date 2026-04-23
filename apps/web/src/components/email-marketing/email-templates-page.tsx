@@ -5,10 +5,12 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Pencil, Plus, Search, Trash2 } from "lucide-react";
+import { ArrowUpDown, Pencil, Plus, Search, Trash2 } from "lucide-react";
 import { useAppDialog } from "@/contexts/app-dialog-context";
 import { apiFetch } from "@/lib/api";
+import { invalidateTemplateRelatedQueries } from "@/lib/invalidate-template-queries";
 import { sessionQueryUserKey } from "@/lib/session-query-scope";
+import { TablePagination } from "@/components/table-pagination";
 
 type Folder = {
   id: string;
@@ -16,6 +18,8 @@ type Folder = {
   _count: { templates: number };
   activeTemplateCount: number;
 };
+
+const TEMPLATES_PAGE_SIZE = 30;
 
 export function EmailTemplatesPage() {
   const router = useRouter();
@@ -31,6 +35,8 @@ export function EmailTemplatesPage() {
   const [editName, setEditName] = useState("");
   const [pendingDelete, setPendingDelete] = useState<{ id: string; name: string } | null>(null);
   const deleteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [listPage, setListPage] = useState(1);
+  const [folderSort, setFolderSort] = useState<"name_asc" | "name_desc">("name_asc");
 
   const { data: folders = [], isError, error, refetch } = useQuery({
     queryKey: ["template-folders", userKey, q],
@@ -44,22 +50,41 @@ export function EmailTemplatesPage() {
     [folders, pendingDelete],
   );
 
+  const sortedFolders = useMemo(() => {
+    const list = [...visibleFolders];
+    list.sort((a, b) => {
+      const c = a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+      return folderSort === "name_asc" ? c : -c;
+    });
+    return list;
+  }, [visibleFolders, folderSort]);
+
+  useEffect(() => {
+    setListPage(1);
+  }, [q, folderSort]);
+
+  const listTotal = sortedFolders.length;
+  const totalListPages = Math.max(1, Math.ceil(listTotal / TEMPLATES_PAGE_SIZE));
+  const pagedFolders = useMemo(() => {
+    const s = (listPage - 1) * TEMPLATES_PAGE_SIZE;
+    return sortedFolders.slice(s, s + TEMPLATES_PAGE_SIZE);
+  }, [sortedFolders, listPage]);
+  const rangeFrom = listTotal === 0 ? 0 : (listPage - 1) * TEMPLATES_PAGE_SIZE + 1;
+  const rangeTo = Math.min(listPage * TEMPLATES_PAGE_SIZE, listTotal);
+
   useEffect(() => {
     return () => {
       if (deleteTimerRef.current) clearTimeout(deleteTimerRef.current);
     };
   }, []);
 
-  const create = useMutation({
-    mutationFn: (name: string) =>
-      apiFetch("/email-marketing/templates/folders", token, { method: "POST", body: JSON.stringify({ name }) }),
-    onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: ["template-folders", userKey] });
-      setOpen(false);
-      setNewName("");
-    },
-    onError: (e: Error) => void showAlert(e.message),
-  });
+  function onNewFolderNext() {
+    const n = newName.trim();
+    if (!n) return;
+    setOpen(false);
+    setNewName("");
+    router.push(`/email-marketing/templates/new?newFolderName=${encodeURIComponent(n)}`);
+  }
 
   const rename = useMutation({
     mutationFn: ({ id, name }: { id: string; name: string }) =>
@@ -67,9 +92,8 @@ export function EmailTemplatesPage() {
         method: "PATCH",
         body: JSON.stringify({ name }),
       }),
-    onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: ["template-folders", userKey] });
-      void qc.invalidateQueries({ queryKey: ["template-folder-meta", userKey] });
+    onSuccess: async (_, { id: folderIdForMeta }) => {
+      await invalidateTemplateRelatedQueries(qc, userKey, { folderId: folderIdForMeta });
       setEditFolder(null);
     },
     onError: (e: Error) => void showAlert(e.message),
@@ -78,7 +102,7 @@ export function EmailTemplatesPage() {
   const removeFolder = useMutation({
     mutationFn: (id: string) =>
       apiFetch(`/email-marketing/templates/folders/${id}`, token, { method: "DELETE" }),
-    onSuccess: () => void qc.invalidateQueries({ queryKey: ["template-folders", userKey] }),
+    onSuccess: () => void invalidateTemplateRelatedQueries(qc, userKey),
   });
 
   async function scheduleFolderDelete(f: Folder) {
@@ -125,13 +149,7 @@ export function EmailTemplatesPage() {
         </div>
       ) : null}
 
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-white">Templates</h1>
-        <Link href="/email-marketing/templates/new" className="em-btn-primary inline-flex items-center gap-2">
-          <Plus className="h-4 w-4" />
-          New template
-        </Link>
-      </div>
+      <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-white">Templates</h1>
 
       {pendingDelete ? (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950 dark:border-amber-500/40 dark:bg-amber-500/15 dark:text-amber-100">
@@ -144,19 +162,51 @@ export function EmailTemplatesPage() {
         </div>
       ) : null}
 
-      <div className="relative max-w-md">
-        <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-        <input
-          className="w-full rounded-xl border border-slate-200 bg-white py-2 pl-9 pr-3 text-sm shadow-sm transition focus:border-indigo-600 focus:outline-none focus:ring-2 focus:ring-indigo-500/25 dark:border-slate-600 dark:bg-slate-800 dark:focus:border-indigo-400"
-          placeholder="Search folders…"
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-        />
+      <div className="space-y-3">
+        <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
+          <div className="relative min-w-0 flex-1 sm:max-w-md">
+            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+            <input
+              className="w-full rounded-xl border border-slate-200 bg-white py-2 pl-9 pr-3 text-sm shadow-sm transition focus:border-indigo-600 focus:outline-none focus:ring-2 focus:ring-indigo-500/25 dark:border-slate-600 dark:bg-slate-800 dark:focus:border-indigo-400"
+              placeholder="Search folders…"
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+            />
+          </div>
+          <div className="flex flex-wrap items-center gap-2 sm:shrink-0">
+            <div className="relative min-w-0 sm:min-w-[9.5rem]">
+              <ArrowUpDown className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
+              <select
+                className="em-btn-outline h-9 w-full cursor-pointer appearance-none rounded-xl border-slate-200 py-0 pl-8 pr-3 text-sm dark:border-slate-600"
+                value={folderSort}
+                onChange={(e) => setFolderSort(e.target.value as "name_asc" | "name_desc")}
+                aria-label="Sort folders"
+              >
+                <option value="name_asc">Sort: A–Z</option>
+                <option value="name_desc">Sort: Z–A</option>
+              </select>
+            </div>
+            <Link
+              href="/email-marketing/templates/new"
+              className="em-btn-primary inline-flex h-9 items-center justify-center gap-2 whitespace-nowrap px-4"
+            >
+              <Plus className="h-4 w-4" />
+              New template
+            </Link>
+          </div>
+        </div>
+        {listTotal > 0 || q.trim() ? (
+          <p className="text-xs text-slate-500 dark:text-slate-400">
+            <span className="tabular-nums">
+              {rangeFrom} - {rangeTo} of {listTotal}
+            </span>
+          </p>
+        ) : null}
       </div>
 
-      <div className="grid items-start gap-4 sm:grid-cols-2 xl:grid-cols-3">
-        {visibleFolders.map((f) => (
-          <div key={f.id} className="em-card flex h-full min-h-0 flex-col overflow-hidden p-0">
+      <div className="grid auto-rows-fr items-stretch gap-4 sm:grid-cols-2 xl:grid-cols-3">
+        {pagedFolders.map((f) => (
+          <div key={f.id} className="em-card em-surface-hover flex h-full min-h-0 flex-col overflow-hidden p-0">
             <div className="flex h-full min-h-0 flex-col p-4 pb-3">
               <div className="text-lg font-semibold text-slate-900 dark:text-white">{f.name}</div>
               <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
@@ -203,20 +253,30 @@ export function EmailTemplatesPage() {
           </div>
         ))}
 
-        <button
-          type="button"
-          onClick={() => {
-            setNewName("");
-            setOpen(true);
-          }}
-          className="flex h-full min-h-0 flex-col items-center justify-center rounded-2xl border-2 border-dashed border-slate-300 bg-white/60 py-8 text-slate-500 transition hover:border-indigo-400 hover:bg-indigo-50/60 dark:border-slate-500/70 dark:bg-slate-800/50 dark:text-slate-400 dark:hover:border-indigo-400 dark:hover:bg-slate-700/50"
-        >
-          <Plus className="h-10 w-10 text-slate-400 dark:text-indigo-400/90" strokeWidth={1.5} />
-          <span className="mt-2 text-sm font-semibold text-slate-600 dark:text-slate-300">New folder</span>
-        </button>
+        {listPage === 1 ? (
+          <button
+            type="button"
+            onClick={() => {
+              setNewName("");
+              setOpen(true);
+            }}
+            className="em-card em-surface-hover flex h-full min-h-[11.5rem] flex-col items-center justify-center border-2 border-dashed border-slate-300/90 bg-slate-50/40 p-4 py-6 text-slate-500 transition hover:border-indigo-400/80 hover:bg-indigo-50/50 dark:border-slate-500/60 dark:bg-slate-800/40 dark:text-slate-400 dark:hover:border-indigo-400/70 dark:hover:bg-slate-800/80"
+          >
+            <Plus className="h-8 w-8 text-slate-400 dark:text-indigo-400/90" strokeWidth={1.5} />
+            <span className="mt-2 text-sm font-semibold text-slate-600 dark:text-slate-300">New folder</span>
+          </button>
+        ) : null}
       </div>
 
-      {q.trim() && visibleFolders.length === 0 ? (
+      <TablePagination
+        page={listPage}
+        totalPages={totalListPages}
+        limit={TEMPLATES_PAGE_SIZE}
+        onPageChange={setListPage}
+        showLimitSelect={false}
+      />
+
+      {q.trim() && sortedFolders.length === 0 ? (
         <p className="text-center text-sm text-slate-500 dark:text-slate-400">No folders match your search.</p>
       ) : null}
 
@@ -230,7 +290,7 @@ export function EmailTemplatesPage() {
               onChange={(e) => setNewName(e.target.value)}
               placeholder="Folder name"
             />
-            <div className="mt-4 flex justify-end gap-2">
+            <div className="mt-4 flex flex-wrap items-center justify-end gap-2">
               <button
                 type="button"
                 className="rounded-lg px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-700"
@@ -241,8 +301,13 @@ export function EmailTemplatesPage() {
               >
                 Cancel
               </button>
-              <button type="button" className="em-btn-primary" onClick={() => newName.trim() && void create.mutate(newName.trim())}>
-                Save
+              <button
+                type="button"
+                className="em-btn-primary"
+                disabled={!newName.trim()}
+                onClick={() => onNewFolderNext()}
+              >
+                Next
               </button>
             </div>
           </div>

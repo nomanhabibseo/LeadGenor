@@ -7,14 +7,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronDown,
   ExternalLink,
-  Eye,
   FileUp,
   Filter,
   LayoutGrid,
-  Pencil,
   Plus,
-  RotateCcw,
-  Trash2,
   X,
 } from "lucide-react";
 import { useAppDialog } from "@/contexts/app-dialog-context";
@@ -30,12 +26,12 @@ import {
   NicheTablePill,
 } from "@/components/table-status-badges";
 import { cn } from "@/lib/utils";
-import {
-  countriesShortList,
-  nicheFirstWord,
-} from "@/lib/vendor-table-display";
+import { countriesShortList, nicheFirstWord } from "@/lib/vendor-table-display";
+import { CountryFlagsCell } from "@/components/country-flags-cell";
+import { DataTableRowMenu, type RowMenuItem } from "@/components/data-table-row-menu";
+import { TrafficSparkline } from "@/components/traffic-sparkline";
 
-const PAGE_SIZE = 100;
+const DEFAULT_LIST_LIMIT = 20;
 
 type DealStatus = "DEAL_DONE" | "PENDING";
 
@@ -152,11 +148,12 @@ function buildVendorListUrl(
   searchUrl: string,
   f: VendorFilters,
   scopeAllowsDealFilter: boolean,
+  listLimit: number,
 ) {
   const qs = new URLSearchParams();
   qs.set("scope", scope);
   qs.set("page", String(page));
-  qs.set("limit", String(PAGE_SIZE));
+  qs.set("limit", String(listLimit));
   if (searchUrl.trim()) qs.set("searchUrl", searchUrl.trim());
   if (f.nicheId) qs.set("nicheIds", f.nicheId);
   if (f.countryId) qs.set("countryIds", f.countryId);
@@ -199,6 +196,7 @@ export function VendorTable({
   const { data: ref, isLoading: refLoading } = useReference();
   const [searchUrl, setSearchUrl] = useState("");
   const [page, setPage] = useState(1);
+  const listLimit = DEFAULT_LIST_LIMIT;
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const undoBannerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [undoTrashBanner, setUndoTrashBanner] = useState<{ id: string } | null>(null);
@@ -242,12 +240,12 @@ export function VendorTable({
   const [exportBusy, setExportBusy] = useState(false);
 
   const listUrl = useMemo(
-    () => buildVendorListUrl(scope, page, searchUrl, applied, scopeAllowsDealFilter),
-    [scope, page, searchUrl, applied, scopeAllowsDealFilter],
+    () => buildVendorListUrl(scope, page, searchUrl, applied, scopeAllowsDealFilter, listLimit),
+    [scope, page, searchUrl, applied, scopeAllowsDealFilter, listLimit],
   );
 
   const { data, isLoading } = useQuery({
-    queryKey: ["vendors", scope, page, searchUrl, applied],
+    queryKey: ["vendors", scope, page, listLimit, searchUrl, applied],
     queryFn: () =>
       apiFetch<{
         data: Row[];
@@ -266,7 +264,7 @@ export function VendorTable({
 
   const rows = useMemo(() => data?.data ?? [], [data?.data]);
   const total = data?.total ?? 0;
-  const limit = data?.limit ?? PAGE_SIZE;
+  const limit = data?.limit ?? listLimit;
   const totalPages = Math.max(1, Math.ceil(total / limit));
   const from = total === 0 ? 0 : (page - 1) * limit + 1;
   const to = Math.min(page * limit, total);
@@ -671,7 +669,7 @@ export function VendorTable({
       <div className="mt-4 space-y-3 text-xs text-slate-600 dark:text-slate-400">
         <p>
           <span className="text-[11px] font-medium">
-            {from}–{to} of {total}
+            {from} - {to} of {total}
           </span>
           {selected.size > 0 ? ` — ${selected.size} selected` : ""}
           {!selected.size && rows.length > 0 ? (
@@ -1253,18 +1251,20 @@ export function VendorTable({
                     </td>
                   ) : null}
                   {cols.country ? (
-                    <td
-                      className="data-table-td max-w-[7rem] truncate"
-                      title={r.countries.map((c) => c.country.name).join(", ")}
-                    >
-                      {countriesShortList(r.countries)}
+                    <td className="data-table-td max-w-[10rem]" title={r.countries.map((c) => c.country.name).join(", ")}>
+                      <CountryFlagsCell countries={r.countries} />
                     </td>
                   ) : null}
                   {cols.language ? (
                     <td className="data-table-td max-w-[7rem] truncate">{r.language.name}</td>
                   ) : null}
                   {cols.traffic ? (
-                    <td className="data-table-td tabular-nums">{r.traffic.toLocaleString()}</td>
+                    <td className="data-table-td">
+                      <div className="inline-flex min-w-0 items-center justify-center gap-1.5 tabular-nums">
+                        <TrafficSparkline value={r.traffic} seed={r.id} />
+                        <span>{r.traffic.toLocaleString()}</span>
+                      </div>
+                    </td>
                   ) : null}
                   {cols.dr ? (
                     <td className="data-table-td">
@@ -1288,72 +1288,49 @@ export function VendorTable({
                   ) : null}
                   {cols.actions ? (
                     <td className="data-table-td whitespace-nowrap">
-                      <div className="inline-flex flex-nowrap items-center justify-center gap-1">
-                        <Link
-                          href={`/vendors/${r.id}`}
-                          className="inline-flex rounded p-1.5 text-slate-600 hover:bg-slate-100 hover:text-sky-600 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-sky-400"
-                          title="View"
-                        >
-                          <Eye className="h-4 w-4" />
-                        </Link>
-                        {scope !== "trash" ? (
-                          <>
-                            <Link
-                              href={`/vendors/${r.id}/edit`}
-                              className="inline-flex rounded p-1.5 text-slate-600 hover:bg-slate-100 hover:text-sky-600 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-sky-400"
-                              title="Edit"
-                            >
-                              <Pencil className="h-4 w-4" />
-                            </Link>
-                            <button
-                              type="button"
-                              className="inline-flex rounded p-1.5 text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/40"
-                              title="Delete"
-                              onClick={() => void confirmSoftDeleteVendor(r.id)}
-                            >
-                              <Trash2 className="h-4 w-4" />
-                            </button>
-                          </>
-                        ) : (
-                          <>
-                            <button
-                              type="button"
-                              className="inline-flex rounded p-1.5 text-sky-600 hover:bg-slate-100 dark:text-sky-400 dark:hover:bg-slate-800"
-                              title="Restore"
-                              onClick={async () => {
-                                await fetch(
-                                  apiUrl(`/vendors/${r.id}/restore`),
-                                  {
-                                    method: "POST",
-                                    headers: {
-                                      Authorization: `Bearer ${token}`,
-                                    },
+                      <DataTableRowMenu
+                        items={
+                          scope !== "trash"
+                            ? ([
+                                { key: "v", type: "link", label: "View", href: `/vendors/${r.id}` },
+                                { key: "e", type: "link", label: "Edit", href: `/vendors/${r.id}/edit` },
+                                {
+                                  key: "d",
+                                  type: "button",
+                                  label: "Delete",
+                                  danger: true,
+                                  onClick: () => void confirmSoftDeleteVendor(r.id),
+                                },
+                              ] satisfies RowMenuItem[])
+                            : ([
+                                {
+                                  key: "r",
+                                  type: "button",
+                                  label: "Restore",
+                                  onClick: () => {
+                                    void (async () => {
+                                      await fetch(apiUrl(`/vendors/${r.id}/restore`), {
+                                        method: "POST",
+                                        headers: { Authorization: `Bearer ${token}` },
+                                      });
+                                      void qc.invalidateQueries({ queryKey: ["vendors"] });
+                                    })();
                                   },
-                                );
-                                void qc.invalidateQueries({
-                                  queryKey: ["vendors"],
-                                });
-                              }}
-                            >
-                              <RotateCcw className="h-4 w-4" />
-                            </button>
-                            <button
-                              type="button"
-                              className="inline-flex rounded p-1.5 text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/40"
-                              title="Delete permanently"
-                              onClick={() =>
-                                void (async () => {
-                                  if (!(await showConfirm("Permanently delete this vendor? This cannot be undone.")))
-                                    return;
-                                  await runPermanentDelete([r.id]);
-                                })()
-                              }
-                            >
-                              <Trash2 className="h-4 w-4" />
-                            </button>
-                          </>
-                        )}
-                      </div>
+                                },
+                                {
+                                  key: "p",
+                                  type: "button",
+                                  label: "Delete permanently",
+                                  danger: true,
+                                  onClick: () =>
+                                    void (async () => {
+                                      if (!(await showConfirm("Permanently delete this vendor? This cannot be undone."))) return;
+                                      await runPermanentDelete([r.id]);
+                                    })(),
+                                },
+                              ] satisfies RowMenuItem[])
+                        }
+                      />
                     </td>
                   ) : null}
                 </tr>
@@ -1366,9 +1343,9 @@ export function VendorTable({
       <TablePagination
         page={page}
         totalPages={totalPages}
-        total={total}
         limit={limit}
         onPageChange={setPage}
+        showLimitSelect={false}
       />
 
     </div>

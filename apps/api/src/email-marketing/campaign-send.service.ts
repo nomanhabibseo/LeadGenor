@@ -369,6 +369,7 @@ export class CampaignSendService {
     for (const sid of senderIds) {
       const refreshed = await this.accounts.ensureDailyCounter(sid);
       if (!refreshed || refreshed.userId !== userId) continue;
+      if (!refreshed.campaignsEnabled) continue;
       if (refreshed.sentToday >= refreshed.dailyLimit) continue;
       if (refreshed.nextSendAllowedAt && refreshed.nextSendAllowedAt > now) continue;
       const util = refreshed.sentToday / Math.max(refreshed.dailyLimit, 1);
