@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { CampaignStatus } from '@prisma/client';
 import { Type } from 'class-transformer';
 import {
@@ -139,9 +139,21 @@ export class EmailCampaignsController {
     return this.campaigns.list(user.userId);
   }
 
-  @Get('trash')
-  async trash(@CurrentUser() user: JwtUser) {
-    return this.campaigns.listTrash(user.userId);
+  @Get('reports/completed')
+  async reportsCompleted(@CurrentUser() user: JwtUser) {
+    return this.campaigns.completedReports(user.userId);
+  }
+
+  @Get('reports/sends')
+  async reportsSends(@CurrentUser() user: JwtUser, @Query('status') status?: string) {
+    const raw = String(status ?? '').trim();
+    const statuses =
+      raw === 'COMPLETED'
+        ? [CampaignStatus.COMPLETED]
+        : raw === 'RUNNING'
+          ? [CampaignStatus.RUNNING]
+          : [CampaignStatus.RUNNING, CampaignStatus.COMPLETED];
+    return this.campaigns.sendReports(user.userId, statuses);
   }
 
   @Post()
@@ -152,11 +164,6 @@ export class EmailCampaignsController {
   @Get(':id')
   async get(@CurrentUser() user: JwtUser, @Param('id') id: string) {
     return this.campaigns.get(user.userId, id);
-  }
-
-  @Post(':id/restore')
-  async restore(@CurrentUser() user: JwtUser, @Param('id') id: string) {
-    return this.campaigns.restore(user.userId, id);
   }
 
   @Patch(':id')
@@ -194,5 +201,16 @@ export class EmailCampaignsController {
     });
     await this.campaignSend.tick();
     return updated;
+  }
+
+  @Get(':id/reports/sends/accounts/:accountId')
+  async reportAccount(
+    @CurrentUser() user: JwtUser,
+    @Param('id') id: string,
+    @Param('accountId') accountId: string,
+    @Query('take') take?: string,
+  ) {
+    const n = Number(take ?? 200);
+    return this.campaigns.sendReportAccountDrilldown(user.userId, id, accountId, Number.isFinite(n) ? n : 200);
   }
 }

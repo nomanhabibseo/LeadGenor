@@ -19,6 +19,7 @@ import { EmailTagsInput } from "@/components/email-tags-input";
 import { RefIdChipsField } from "@/components/ref-id-chips-field";
 import { StepperField } from "@/components/stepper-field";
 import { VENDOR_COUNTRY_MAX, VENDOR_NICHE_MAX } from "@/lib/vendor-client-form-limits";
+import { findEmailsFromUrl } from "@/lib/email-finder";
 
 const empty = {
   companyName: "",
@@ -48,7 +49,7 @@ const empty = {
   contactEmail: "",
   contactPageUrl: "",
   dealStatus: "PENDING" as "DEAL_DONE" | "PENDING",
-  recordDate: "",
+  recordDate: new Date().toISOString().slice(0, 10),
   notes: "",
 };
 
@@ -74,6 +75,8 @@ export function VendorForm({ vendorId }: { vendorId?: string }) {
   const [form, setForm] = useState(empty);
   const [dupModal, setDupModal] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [findingEmail, setFindingEmail] = useState(false);
+  const [findEmailMsg, setFindEmailMsg] = useState<string | null>(null);
   const [nicheOpen, setNicheOpen] = useState(false);
   const [countryOpen, setCountryOpen] = useState(false);
   const [languageOpen, setLanguageOpen] = useState(false);
@@ -925,17 +928,51 @@ export function VendorForm({ vendorId }: { vendorId?: string }) {
               <span className="form-label-sm">
                 Email <span className="text-red-500">*</span>
               </span>
-              <EmailTagsInput
-                className="mt-1"
-                value={form.contactEmail}
-                invalid={!!fieldErrors.contactEmail}
-                aria-invalid={fieldErrors.contactEmail ? "true" : undefined}
-                onChange={(contactEmail) => {
-                  clearFieldError("contactEmail");
-                  setForm({ ...form, contactEmail });
-                }}
-              />
+              <div className="relative mt-1">
+                <EmailTagsInput
+                  value={form.contactEmail}
+                  invalid={!!fieldErrors.contactEmail}
+                  aria-invalid={fieldErrors.contactEmail ? "true" : undefined}
+                  onChange={(contactEmail) => {
+                    clearFieldError("contactEmail");
+                    setForm({ ...form, contactEmail });
+                  }}
+                />
+                {!form.contactEmail.trim() ? (
+                  <button
+                    type="button"
+                    disabled={findingEmail || !form.siteUrl.trim()}
+                    onClick={async () => {
+                      if (!token) return;
+                      const url = form.siteUrl.trim();
+                      if (!url) {
+                        setFindEmailMsg("Add site URL first.");
+                        return;
+                      }
+                      setFindEmailMsg(null);
+                      setFindingEmail(true);
+                      try {
+                        const r = await findEmailsFromUrl(token, url);
+                        if (!r.emails?.length) {
+                          setFindEmailMsg("Not found");
+                          return;
+                        }
+                        setForm((f) => ({ ...f, contactEmail: r.emails.join(", ") }));
+                      } catch {
+                        setFindEmailMsg("Not found");
+                      } finally {
+                        setFindingEmail(false);
+                      }
+                    }}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:opacity-50 dark:border-slate-600 dark:bg-slate-900/60 dark:text-slate-200 dark:hover:bg-slate-800"
+                    title="Find emails from the website"
+                  >
+                    {findingEmail ? "Finding…" : "Find email"}
+                  </button>
+                ) : null}
+              </div>
               {fieldErrors.contactEmail ? <p className="form-field-error">{fieldErrors.contactEmail}</p> : null}
+              {findEmailMsg ? <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">{findEmailMsg}</p> : null}
             </label>
             <label className="block">
               <span className="form-label-sm">Contact page URL</span>

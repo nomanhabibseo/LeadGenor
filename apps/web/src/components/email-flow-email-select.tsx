@@ -22,6 +22,7 @@ export function FlowEmailTemplateSelect({
   emptyLabel = "Add email content",
   showEmailPill = true,
   compact = false,
+  readOnly = false,
 }: {
   value: string;
   onChange: (templateId: string) => void;
@@ -31,6 +32,7 @@ export function FlowEmailTemplateSelect({
   emptyLabel?: string;
   showEmailPill?: boolean;
   compact?: boolean;
+  readOnly?: boolean;
 }) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerView, setPickerView] = useState<"folders" | "templates">("folders");
@@ -96,17 +98,8 @@ export function FlowEmailTemplateSelect({
         : "relative inline-flex w-full max-w-sm min-w-[12rem] flex-col items-stretch justify-center"
       : "relative flex w-full min-w-0 flex-col items-stretch";
 
-  return (
-    <div className={cn(outer, flowCardClass)}>
-      <button
-        type="button"
-        className={cn(
-          "relative w-full text-left transition hover:bg-slate-50/80 dark:hover:bg-slate-800/60",
-          innerRound,
-        )}
-        aria-label="Choose email template"
-        onClick={openPicker}
-      >
+  const content = (
+    <>
         <div className="flex min-w-0 max-w-full flex-col items-center gap-1 px-2 text-center">
           {showEmailPill ? (
             <span className="inline-flex items-center gap-1.5 rounded-full bg-sky-100 px-2.5 py-0.5 text-[10px] font-semibold text-sky-900 dark:bg-sky-950/60 dark:text-sky-100">
@@ -124,13 +117,41 @@ export function FlowEmailTemplateSelect({
             {summary}
           </span>
         </div>
+        {!readOnly ? (
         <ChevronDown
           className={cn(
             "pointer-events-none absolute top-1/2 shrink-0 -translate-y-1/2 text-slate-400",
             compact ? "right-1.5 h-3 w-3" : "right-2.5 h-4 w-4",
           )}
         />
-      </button>
+        ) : null}
+    </>
+  );
+
+  return (
+    <div className={cn(outer, flowCardClass)}>
+      {readOnly ? (
+        <div
+          className={cn(
+            "relative w-full text-left",
+            innerRound,
+          )}
+        >
+          {content}
+        </div>
+      ) : (
+        <button
+          type="button"
+          className={cn(
+            "relative w-full text-left transition hover:bg-slate-50/80 dark:hover:bg-slate-800/60",
+            innerRound,
+          )}
+          aria-label="Choose email template"
+          onClick={openPicker}
+        >
+          {content}
+        </button>
+      )}
 
       {pickerOpen ? (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 p-4" onClick={closePicker} role="presentation">

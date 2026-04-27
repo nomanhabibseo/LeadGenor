@@ -209,6 +209,7 @@ export function VendorTable({
   const [extraPickerOpen, setExtraPickerOpen] = useState(false);
   const [draft, setDraft] = useState<VendorFilters>(emptyFilters);
   const [applied, setApplied] = useState<VendorFilters>(emptyFilters);
+  const [scopeMenuOpen, setScopeMenuOpen] = useState(false);
 
   const colStorageKey = `vendor-table-cols-${scope}`;
   const [cols, setCols] = useState<Record<ColKey, boolean>>(defaultCols);
@@ -373,6 +374,39 @@ export function VendorTable({
     void qc.invalidateQueries({ queryKey: ["stats"] });
   }
 
+  async function confirmSoftDeleteSelectedVendors(ids: string[]) {
+    if (!ids.length) return;
+    if (!(await showConfirm(`Delete ${ids.length} selected row(s)?`))) return;
+    if (!token) return;
+
+    const snapshots = qc.getQueriesData<VendorListPayload>({ queryKey: ["vendors"] });
+    qc.setQueriesData<VendorListPayload>({ queryKey: ["vendors"] }, (old) => {
+      if (!old) return old;
+      const prevLen = old.data.length;
+      const next = old.data.filter((r) => !ids.includes(r.id));
+      const removed = prevLen - next.length;
+      if (!removed) return old;
+      return { ...old, data: next, total: Math.max(0, old.total - removed) };
+    });
+    setSelected(new Set());
+
+    const results = await Promise.allSettled(
+      ids.map((id) =>
+        fetch(apiUrl(`/vendors/${id}`), {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+      ),
+    );
+    const failed = results.filter((r) => r.status !== "fulfilled" || !r.value.ok);
+    if (failed.length) {
+      snapshots.forEach(([key, data]) => qc.setQueryData(key, data));
+      void showAlert(`Could not delete ${failed.length} row(s). Please try again.`);
+    }
+    void qc.invalidateQueries({ queryKey: ["vendors"] });
+    void qc.invalidateQueries({ queryKey: ["stats"] });
+  }
+
   async function restoreVendorFromUndo() {
     if (!undoTrashBanner || !token) return;
     const res = await fetch(apiUrl(`/vendors/${undoTrashBanner.id}/restore`), {
@@ -385,6 +419,21 @@ export function VendorTable({
     }
     if (undoBannerTimerRef.current) clearTimeout(undoBannerTimerRef.current);
     setUndoTrashBanner(null);
+    void qc.invalidateQueries({ queryKey: ["vendors"] });
+    void qc.invalidateQueries({ queryKey: ["stats"] });
+  }
+
+  async function restoreSelectedVendors(ids: string[]) {
+    if (!ids.length) return;
+    if (!token) return;
+    if (!(await showConfirm(`Restore ${ids.length} site(s)?`))) return;
+    for (const id of ids) {
+      await fetch(apiUrl(`/vendors/${id}/restore`), {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+    }
+    setSelected(new Set());
     void qc.invalidateQueries({ queryKey: ["vendors"] });
     void qc.invalidateQueries({ queryKey: ["stats"] });
   }
@@ -636,6 +685,15 @@ export function VendorTable({
           {showBulkPrice ? <BulkPriceButton onApply={(p) => void bulkPrice(p)} /> : null}
           {scope !== "trash" ? (
             <>
+              {selected.size > 0 ? (
+                <button
+                  type="button"
+                  className="inline-flex h-8 items-center rounded-lg border border-red-200 bg-red-50 px-3 text-sm font-medium text-red-800 shadow-sm transition hover:bg-red-100 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200 dark:hover:bg-red-950/45"
+                  onClick={() => void confirmSoftDeleteSelectedVendors(Array.from(selected))}
+                >
+                  Delete selected rows
+                </button>
+              ) : null}
               <button
                 type="button"
                 className="btn-toolbar-outline"
@@ -661,6 +719,30 @@ export function VendorTable({
                 <Plus className="h-4 w-4" aria-hidden />
                 Add vendor
               </Link>
+            </>
+          ) : selected.size > 0 ? (
+            <>
+              <button
+                type="button"
+                className="btn-toolbar-outline"
+                onClick={() => void restoreSelectedVendors(Array.from(selected))}
+              >
+                Restore selected
+              </button>
+              <button
+                type="button"
+                className="inline-flex h-8 items-center rounded-lg border border-red-200 bg-red-50 px-3 text-sm font-medium text-red-800 shadow-sm transition hover:bg-red-100 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200 dark:hover:bg-red-950/45"
+                onClick={() => {
+                  const ids = [...selected];
+                  void (async () => {
+                    if (!ids.length) return;
+                    if (!(await showConfirm(`Permanently delete ${ids.length} site(s)? This cannot be undone.`))) return;
+                    await runPermanentDelete(ids);
+                  })();
+                }}
+              >
+                Delete selected
+              </button>
             </>
           ) : null}
         </div>
@@ -695,24 +777,37 @@ export function VendorTable({
                   <span className="text-[11px] text-slate-400">Loading lists…</span>
                 ) : (
                   <>
-                    <Link
-                      href="/vendors"
-                      className={cn("scope-pill", scope === "all" && "scope-pill-active")}
-                    >
-                      All ({dashStats.totalVendors})
-                    </Link>
-                    <Link
-                      href="/vendors/deal-done"
-                      className={cn("scope-pill", scope === "deal_done" && "scope-pill-active")}
-                    >
-                      Deal done ({dashStats.dealDoneVendors})
-                    </Link>
-                    <Link
-                      href="/vendors/pending"
-                      className={cn("scope-pill", scope === "pending" && "scope-pill-active")}
-                    >
-                      Pending deals ({dashStats.pendingDeals})
-                    </Link>
+                    <div className="relative">
+                      <button
+                        type="button"
+                        className={cn("scope-pill", (scope === "all" || scope === "deal_done" || scope === "pending") && "scope-pill-active")}
+                        onClick={() => setScopeMenuOpen((o) => !o)}
+                      >
+                        All ({dashStats.totalVendors})
+                        <ChevronDown className="ml-1 h-3.5 w-3.5 opacity-80" />
+                      </button>
+                      {scopeMenuOpen ? (
+                        <>
+                          <button
+                            type="button"
+                            className="fixed inset-0 z-40 cursor-default"
+                            aria-label="Close menu"
+                            onClick={() => setScopeMenuOpen(false)}
+                          />
+                          <div className="absolute left-0 top-full z-50 mt-2 w-64 overflow-hidden rounded-xl border border-slate-200 bg-white p-1 shadow-xl dark:border-slate-700 dark:bg-slate-950">
+                            <Link className={cn("block rounded-lg px-3 py-2 text-sm hover:bg-slate-50 dark:hover:bg-slate-900/60", scope === "all" && "font-semibold text-violet-700 dark:text-violet-300")} href="/vendors" onClick={() => setScopeMenuOpen(false)}>
+                              All ({dashStats.totalVendors})
+                            </Link>
+                            <Link className={cn("block rounded-lg px-3 py-2 text-sm hover:bg-slate-50 dark:hover:bg-slate-900/60", scope === "deal_done" && "font-semibold text-violet-700 dark:text-violet-300")} href="/vendors/deal-done" onClick={() => setScopeMenuOpen(false)}>
+                              Deal done ({dashStats.dealDoneVendors})
+                            </Link>
+                            <Link className={cn("block rounded-lg px-3 py-2 text-sm hover:bg-slate-50 dark:hover:bg-slate-900/60", scope === "pending" && "font-semibold text-violet-700 dark:text-violet-300")} href="/vendors/pending" onClick={() => setScopeMenuOpen(false)}>
+                              Pending deals ({dashStats.pendingDeals})
+                            </Link>
+                          </div>
+                        </>
+                      ) : null}
+                    </div>
                   </>
                 )}
               </>
@@ -1132,25 +1227,7 @@ export function VendorTable({
         onImportFromSheet={() => void onImportFromSheet()}
       />
 
-      {scope === "trash" && selected.size > 0 && (
-        <div className="mt-3">
-          <button
-            type="button"
-            className="rounded-lg border border-red-200 bg-red-50 px-3 py-1.5 text-sm font-medium text-red-800 hover:bg-red-100"
-            onClick={() => {
-              const ids = [...selected];
-              void (async () => {
-                if (!ids.length) return;
-                if (!(await showConfirm(`Permanently delete ${ids.length} site(s)? This cannot be undone.`)))
-                  return;
-                await runPermanentDelete(ids);
-              })();
-            }}
-          >
-            Delete selected permanently
-          </button>
-        </div>
-      )}
+      {/* Bulk trash actions are shown in the top toolbar when rows are selected. */}
 
       {undoTrashBanner ? (
         <div className="mt-4 flex items-center justify-between rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm text-emerald-950 dark:border-emerald-500/35 dark:bg-emerald-950/30 dark:text-emerald-100">

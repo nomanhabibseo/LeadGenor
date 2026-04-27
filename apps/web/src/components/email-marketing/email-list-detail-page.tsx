@@ -3,7 +3,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { useSession } from "next-auth/react";
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { ChevronDown, Download, ExternalLink, Upload } from "lucide-react";
 import { useAppDialog } from "@/contexts/app-dialog-context";
 import { apiFetch, apiFetchBlob } from "@/lib/api";
@@ -13,6 +13,7 @@ import { DataTableRowMenu, type RowMenuItem } from "@/components/data-table-row-
 import { TrafficSparkline } from "@/components/traffic-sparkline";
 import { iso2ToFlagEmoji } from "@/lib/flag-emoji";
 import { countryShortLabel, nicheFirstWord } from "@/lib/vendor-table-display";
+import { findEmailsFromUrl, findEmailsFromUrls } from "@/lib/email-finder";
 
 type Item = {
   id: string;
@@ -32,28 +33,14 @@ type ClientRow = { id: string; companyName: string; siteUrl: string };
 
 function ListCountryFlagsCell({ raw }: { raw: string }) {
   if (!raw?.trim()) return <span className="text-slate-400">—</span>;
-  const segs = raw
-    .split(/[;,]+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
+  const first = raw.split(/[;,]+/).map((s) => s.trim()).filter(Boolean)[0] ?? "";
+  const upper = first.toUpperCase();
+  const iso2 = (upper.split(/\s+/)[0] ?? "").trim();
+  const isIso2 = /^[A-Z]{2}$/.test(iso2);
+  const label = isIso2 ? countryShortLabel(iso2) : upper;
   return (
-    <div className="inline-flex max-w-full flex-wrap items-center justify-center gap-x-1.5 gap-y-0.5">
-      {segs.map((seg, i) => {
-        const up = seg.toUpperCase();
-        const isIso2 = /^[A-Z]{2}$/.test(up);
-        const label = isIso2 ? countryShortLabel(up) : seg;
-        const flag = isIso2 ? iso2ToFlagEmoji(up) : "";
-        return (
-          <span key={i} className="inline-flex items-center gap-0.5" title={seg}>
-            {flag ? (
-              <span className="text-[14px] leading-none" aria-hidden>
-                {flag}
-              </span>
-            ) : null}
-            <span className="text-[10px] font-medium text-slate-700 dark:text-slate-200">{label}</span>
-          </span>
-        );
-      })}
+    <div className="inline-flex max-w-full items-center justify-center gap-1" title={raw}>
+      <span className="text-[10px] font-medium text-slate-700 dark:text-slate-200">{label}</span>
     </div>
   );
 }
@@ -74,6 +61,10 @@ export function EmailListDetailPage({ listId }: { listId: string }) {
   const undoBannerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [undoSnapshot, setUndoSnapshot] = useState<Item[] | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const [findingIds, setFindingIds] = useState<Set<string>>(new Set());
+  const [findStatus, setFindStatus] = useState<Record<string, "not_found" | "found">>({});
+  const [bulkFinding, setBulkFinding] = useState(false);
 
   const { data: list } = useQuery({
     queryKey: ["email-list", userKey, listId],
@@ -167,10 +158,78 @@ export function EmailListDetailPage({ listId }: { listId: string }) {
 
   const items = itemsPage?.items ?? [];
   const emailsStr = (em: unknown) => (Array.isArray(em) ? (em as string[]).join(", ") : "");
+  const total = itemsPage?.total ?? items.length;
+  const filteredItems = (() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return items;
+    return items.filter((it) => {
+      const em = emailsStr(it.emails).toLowerCase();
+      return it.siteUrl.toLowerCase().includes(q) || em.includes(q);
+    });
+  })();
+
+  const itemsMissingEmail = useMemo(
+    () => filteredItems.filter((it) => !emailsStr(it.emails).trim()),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- computed from filteredItems + helper
+    [filteredItems],
+  );
+
+  async function findOne(it: Item) {
+    if (!token) return;
+    setFindingIds((s) => new Set(s).add(it.id));
+    try {
+      const r = await findEmailsFromUrl(token, it.siteUrl);
+      if (!r.emails?.length) {
+        setFindStatus((m) => ({ ...m, [it.id]: "not_found" }));
+        return;
+      }
+      await apiFetch(`/email-marketing/lists/${listId}/items/${it.id}/emails`, token, {
+        method: "PATCH",
+        body: JSON.stringify({ emails: r.emails }),
+      });
+      setFindStatus((m) => ({ ...m, [it.id]: "found" }));
+      void qc.invalidateQueries({ queryKey: ["email-list-items", userKey, listId] });
+    } catch {
+      setFindStatus((m) => ({ ...m, [it.id]: "not_found" }));
+    } finally {
+      setFindingIds((s) => {
+        const n = new Set(s);
+        n.delete(it.id);
+        return n;
+      });
+    }
+  }
+
+  async function findAllMissing() {
+    if (!token) return;
+    if (!itemsMissingEmail.length) return;
+    setBulkFinding(true);
+    try {
+      const urls = itemsMissingEmail.map((it) => it.siteUrl);
+      const resp = await findEmailsFromUrls(token, urls);
+      const byUrl = new Map(resp.results.map((r) => [r.url, r]));
+      for (const it of itemsMissingEmail) {
+        const r = byUrl.get(it.siteUrl);
+        const emails = r?.emails ?? [];
+        if (!emails.length) {
+          setFindStatus((m) => ({ ...m, [it.id]: "not_found" }));
+          continue;
+        }
+        await apiFetch(`/email-marketing/lists/${listId}/items/${it.id}/emails`, token, {
+          method: "PATCH",
+          body: JSON.stringify({ emails }),
+        });
+        setFindStatus((m) => ({ ...m, [it.id]: "found" }));
+      }
+      void qc.invalidateQueries({ queryKey: ["email-list-items", userKey, listId] });
+    } finally {
+      setBulkFinding(false);
+    }
+  }
 
   const toggleAll = () => {
-    if (sel.size === items.length) setSel(new Set());
-    else setSel(new Set(items.map((i) => i.id)));
+    if (sel.size === filteredItems.length) setSel(new Set());
+    else setSel(new Set(filteredItems.map((i) => i.id)));
   };
 
   const exportFile = async (format: "csv" | "pdf") => {
@@ -288,28 +347,41 @@ export function EmailListDetailPage({ listId }: { listId: string }) {
                   </div>
                 </>
               ) : null}
-              <span className="text-xs text-slate-500 dark:text-slate-400">
-                {sel.size > 0 ? `${sel.size} row(s) selected` : "All rows"}
-              </span>
             </div>
           ) : null}
         </div>
       </div>
 
       {items.length > 0 ? (
-        <div className="flex flex-wrap items-center gap-3 text-sm">
-          <label className="flex items-center gap-2 text-slate-700 dark:text-slate-300">
-            <input type="checkbox" checked={sel.size === items.length && items.length > 0} onChange={toggleAll} />
-            Select all
-          </label>
-          <button
-            type="button"
-            disabled={!sel.size}
-            className="rounded-lg border border-red-200 px-3 py-1 text-red-700 disabled:opacity-40 dark:border-red-800 dark:text-red-300"
-            onClick={() => void confirmRemoveSelected(Array.from(sel))}
-          >
-            Remove selected
-          </button>
+        <div className="space-y-2">
+          <p className="text-xs text-slate-500 dark:text-slate-400">
+            <span className="tabular-nums">
+              1 - {filteredItems.length} of {total}
+            </span>
+          </p>
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div className="relative min-w-0 flex-1 sm:max-w-md">
+              <input
+                type="search"
+                className="table-toolbar-search w-full"
+                placeholder="Search website URL or emails…"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                autoComplete="off"
+              />
+            </div>
+            <div className="flex flex-wrap items-center gap-3 text-sm">
+              {sel.size > 0 ? (
+                <button
+                  type="button"
+                  className="inline-flex h-8 items-center rounded-lg border border-red-200 bg-red-50 px-3 text-sm font-medium text-red-800 shadow-sm transition hover:bg-red-100 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200 dark:hover:bg-red-950/45"
+                  onClick={() => void confirmRemoveSelected(Array.from(sel))}
+                >
+                  Delete selected rows
+                </button>
+              ) : null}
+            </div>
+          </div>
         </div>
       ) : null}
 
@@ -326,7 +398,7 @@ export function EmailListDetailPage({ listId }: { listId: string }) {
 
       {isLoading ? (
         <p className="text-slate-500">Loading…</p>
-      ) : items.length === 0 ? (
+      ) : filteredItems.length === 0 ? (
         <p className="rounded-xl border border-dashed border-slate-300 p-8 text-center text-slate-600 dark:border-slate-600">
           No sites in this list yet. Use Import to add rows.
         </p>
@@ -339,7 +411,7 @@ export function EmailListDetailPage({ listId }: { listId: string }) {
                   <input
                     type="checkbox"
                     className="mx-auto block"
-                    checked={items.length > 0 && sel.size === items.length}
+                    checked={filteredItems.length > 0 && sel.size === filteredItems.length}
                     onChange={toggleAll}
                   />
                 </th>
@@ -350,11 +422,22 @@ export function EmailListDetailPage({ listId }: { listId: string }) {
                 <th className="p-2.5">Country</th>
                 <th className="p-2.5">Traffic</th>
                 <th className="p-2.5">DR</th>
+                <th className="p-2.5">
+                  <button
+                    type="button"
+                    onClick={() => void findAllMissing()}
+                    disabled={bulkFinding || itemsMissingEmail.length === 0}
+                    className="mx-auto inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900/60 dark:text-slate-200 dark:hover:bg-slate-800"
+                    title="Find emails for all rows missing emails"
+                  >
+                    {bulkFinding ? "Finding…" : "Find emails"}
+                  </button>
+                </th>
                 <th className="p-2.5">Actions</th>
               </tr>
             </thead>
             <tbody>
-              {items.map((it, rowIdx) => (
+              {filteredItems.map((it, rowIdx) => (
                 <tr key={it.id} className="data-table-row">
                   <td className="data-table-td">
                     <input
@@ -410,10 +493,30 @@ export function EmailListDetailPage({ listId }: { listId: string }) {
                     <DrTableMeter dr={it.dr} />
                   </td>
                   <td className="data-table-td whitespace-nowrap">
+                    {emailsStr(it.emails).trim() ? (
+                      <span className="text-slate-400">—</span>
+                    ) : findingIds.has(it.id) ? (
+                      <span className="text-slate-500">Finding…</span>
+                    ) : findStatus[it.id] === "not_found" ? (
+                      <span className="inline-flex items-center justify-center rounded-md bg-red-600 px-2 py-1 text-[10px] font-bold uppercase tracking-wide text-white dark:bg-white dark:text-red-700">
+                        Not found
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => void findOne(it)}
+                        className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900/60 dark:text-slate-200 dark:hover:bg-slate-800"
+                      >
+                        Find email
+                      </button>
+                    )}
+                  </td>
+                  <td className="data-table-td whitespace-nowrap">
                     <DataTableRowMenu
                       a11yLabel="Row actions"
                       items={[
                         { key: "v", type: "button", label: "View", onClick: () => setView(it) },
+                        { key: "d", type: "button", label: "Delete", onClick: () => void confirmRemoveSelected([it.id]) },
                       ] satisfies RowMenuItem[]}
                     />
                   </td>

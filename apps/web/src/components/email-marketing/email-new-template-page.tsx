@@ -192,7 +192,8 @@ export function EmailNewTemplatePage() {
         includeUnsubscribeBlock: false,
       });
       await invalidateTemplateRelatedQueries(qc, userKey, { folderId: fid });
-      router.push(`/email-marketing/templates/edit/${created.id}`);
+      // After saving, return to list context (folder if known).
+      router.push(`/email-marketing/templates/folder/${fid}`);
       router.refresh();
     } catch {
       /* mutations already alerted */

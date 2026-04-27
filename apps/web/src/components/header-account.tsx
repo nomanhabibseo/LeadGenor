@@ -2,10 +2,13 @@
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { signOut, useSession } from "next-auth/react";
-import { ChevronDown, User } from "lucide-react";
-import { useState } from "react";
+import Link from "next/link";
+import { Bell, ChevronDown, User } from "lucide-react";
+import { useEffect, useState } from "react";
 import { apiFetch, apiUrl } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { flushQueuedNotifications } from "@/lib/notifications";
+import { sessionQueryUserKey } from "@/lib/session-query-scope";
 
 function firstWordCapital(name: string) {
   const w = name.trim().split(/\s+/)[0] ?? "";
@@ -13,9 +16,10 @@ function firstWordCapital(name: string) {
   return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
 }
 
-export function HeaderAccount() {
+export function HeaderAccount({ tone = "dark" }: { tone?: "dark" | "light" }) {
   const { data: session } = useSession();
   const token = session?.accessToken;
+  const userKey = sessionQueryUserKey(session);
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const [nameEdit, setNameEdit] = useState("");
@@ -29,6 +33,18 @@ export function HeaderAccount() {
     queryFn: () => apiFetch<{ id: string; email: string; name: string | null }>("/users/me", token),
     enabled: !!token,
   });
+
+  const { data: unread } = useQuery({
+    queryKey: ["notifications-unread", userKey],
+    queryFn: () => apiFetch<{ unread: number }>("/notifications/unread-count", token),
+    enabled: !!token && !!userKey,
+    refetchInterval: 15_000,
+  });
+
+  // Best-effort flush any queued notifications once logged in.
+  useEffect(() => {
+    void flushQueuedNotifications(token);
+  }, [token]);
 
   const displayName = me?.name?.trim() || session?.user?.name?.trim() || "";
   const label = firstWordCapital(displayName || (session?.user?.email ?? ""));
@@ -69,6 +85,24 @@ export function HeaderAccount() {
 
   return (
     <div className="flex shrink-0 items-center gap-2">
+      <Link
+        href="/notifications"
+        className={cn(
+          "relative inline-flex h-10 w-10 items-center justify-center rounded-lg transition",
+          tone === "dark"
+            ? "text-white hover:bg-white/10"
+            : "text-slate-700 hover:bg-slate-100/80 dark:text-slate-100 dark:hover:bg-slate-800/70",
+        )}
+        title="Notifications"
+        aria-label="Notifications"
+      >
+        <Bell className="h-4 w-4" />
+        {unread?.unread ? (
+          <span className="absolute -right-1 -top-1 inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-violet-600 px-1 text-[10px] font-bold text-white">
+            {unread.unread > 99 ? "99+" : unread.unread}
+          </span>
+        ) : null}
+      </Link>
       <div className="relative">
         <button
           type="button"
@@ -78,7 +112,12 @@ export function HeaderAccount() {
             setErr(null);
             setNameEdit(me?.name ?? "");
           }}
-          className="flex max-w-[10rem] items-center gap-1.5 rounded-lg border border-white/20 bg-white/10 px-3 py-2 text-sm font-semibold text-slate-100 transition hover:bg-white/15 sm:max-w-xs sm:px-4"
+          className={cn(
+            "flex max-w-[10rem] items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-semibold transition sm:max-w-xs sm:px-4",
+            tone === "dark"
+              ? "border border-white/20 bg-white/10 text-slate-100 hover:bg-white/15"
+              : "border border-slate-200/90 bg-white text-slate-800 shadow-sm hover:bg-slate-50 dark:border-slate-600 dark:bg-slate-800/90 dark:text-slate-100 dark:shadow-none dark:hover:bg-slate-800",
+          )}
         >
           <User className="h-4 w-4 shrink-0 opacity-90" />
           <span className="truncate">{label}</span>

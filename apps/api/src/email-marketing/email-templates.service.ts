@@ -45,6 +45,20 @@ function templateIdsUsedInCampaign(c: {
 export class EmailTemplatesService {
   constructor(private readonly prisma: PrismaService) {}
 
+  private async templateUseCounts(userId: string): Promise<Map<string, number>> {
+    const campaigns = await this.prisma.campaign.findMany({
+      where: { userId, deletedAt: null },
+      select: { mainSequence: true, followUpSequence: true, mainFlowGraph: true },
+    });
+    const map = new Map<string, number>();
+    for (const c of campaigns) {
+      for (const id of templateIdsUsedInCampaign(c)) {
+        map.set(id, (map.get(id) ?? 0) + 1);
+      }
+    }
+    return map;
+  }
+
   private async assertFolderNameUnique(userId: string, name: string, excludeFolderId?: string) {
     const n = name.trim();
     if (!n) return;
@@ -189,7 +203,7 @@ export class EmailTemplatesService {
       where: { id: folderId, userId, deletedAt: null },
     });
     if (!folder) throw new NotFoundException('Folder not found.');
-    return this.prisma.emailTemplate.findMany({
+    const rows = await this.prisma.emailTemplate.findMany({
       where: {
         folderId,
         userId,
@@ -198,8 +212,15 @@ export class EmailTemplatesService {
           ? { name: { contains: search.trim(), mode: 'insensitive' } }
           : {}),
       },
-      orderBy: { updatedAt: 'desc' },
     });
+    const useCounts = await this.templateUseCounts(userId);
+    rows.sort((a, b) => {
+      const ua = useCounts.get(a.id) ?? 0;
+      const ub = useCounts.get(b.id) ?? 0;
+      if (ua !== ub) return ub - ua;
+      return b.updatedAt.getTime() - a.updatedAt.getTime();
+    });
+    return rows;
   }
 
   async createTemplate(
@@ -267,11 +288,18 @@ export class EmailTemplatesService {
   }
 
   async listAllTemplates(userId: string) {
-    return this.prisma.emailTemplate.findMany({
+    const rows = await this.prisma.emailTemplate.findMany({
       where: { userId, deletedAt: null },
-      orderBy: { updatedAt: 'desc' },
       include: { folder: { select: { id: true, name: true } } },
     });
+    const useCounts = await this.templateUseCounts(userId);
+    rows.sort((a, b) => {
+      const ua = useCounts.get(a.id) ?? 0;
+      const ub = useCounts.get(b.id) ?? 0;
+      if (ua !== ub) return ub - ua;
+      return b.updatedAt.getTime() - a.updatedAt.getTime();
+    });
+    return rows;
   }
 
   async getTemplate(userId: string, id: string) {

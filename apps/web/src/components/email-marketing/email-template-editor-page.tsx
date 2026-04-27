@@ -3,7 +3,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useRef, useState, useCallback } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Code2, Eye, Trash2 } from "lucide-react";
 import { useAppDialog } from "@/contexts/app-dialog-context";
 import { apiFetch } from "@/lib/api";
@@ -43,18 +43,9 @@ export function EmailTemplateEditorPage({ templateId }: { templateId: string }) 
   const [attrOpen, setAttrOpen] = useState(false);
   const [attrTarget, setAttrTarget] = useState<"subject" | "body">("body");
   const [previewOpen, setPreviewOpen] = useState(false);
-  const [pendingDelete, setPendingDelete] = useState(false);
-  const deleteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [unsubCardOpen, setUnsubCardOpen] = useState(false);
   const [unsubAnchorDraft, setUnsubAnchorDraft] = useState("");
   const [legacyFooterUnsub, setLegacyFooterUnsub] = useState(false);
-
-  const clearDeleteTimer = useCallback(() => {
-    if (deleteTimerRef.current) clearTimeout(deleteTimerRef.current);
-    deleteTimerRef.current = null;
-  }, []);
-
-  useEffect(() => () => clearDeleteTimer(), [clearDeleteTimer]);
 
   const { data: tpl } = useQuery({
     queryKey: ["template", userKey, templateId],
@@ -89,7 +80,13 @@ export function EmailTemplateEditorPage({ templateId }: { templateId: string }) 
           includeUnsubscribeBlock: legacyFooterUnsub && !hasInlineUnsubscribeInBody(body),
         }),
       }),
-    onSuccess: () => void qc.invalidateQueries({ queryKey: ["template", userKey, templateId] }),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["template", userKey, templateId] });
+      await invalidateTemplateRelatedQueries(qc, userKey, { folderId: tpl?.folder?.id ?? null, templateId });
+      const fid = tpl?.folder?.id ?? null;
+      if (fid) router.push(`/email-marketing/templates/folder/${fid}`);
+      else router.push("/email-marketing/templates");
+    },
   });
 
   const remove = useMutation({
@@ -103,20 +100,9 @@ export function EmailTemplateEditorPage({ templateId }: { templateId: string }) 
     },
   });
 
-  async function scheduleDelete() {
-    if (!(await showConfirm("Delete this template? You can undo for a few seconds after."))) return;
-    clearDeleteTimer();
-    setPendingDelete(true);
-    deleteTimerRef.current = setTimeout(() => {
-      void remove.mutate();
-      setPendingDelete(false);
-      deleteTimerRef.current = null;
-    }, 5000);
-  }
-
-  function undoDelete() {
-    clearDeleteTimer();
-    setPendingDelete(false);
+  async function deleteNow() {
+    if (!(await showConfirm("Delete this template? This cannot be undone."))) return;
+    await remove.mutateAsync();
   }
 
   const previewVars = useMemo(() => sampleMergeVars(), []);
@@ -312,15 +298,6 @@ export function EmailTemplateEditorPage({ templateId }: { templateId: string }) 
           </div>
         </div>
 
-        {pendingDelete ? (
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950 dark:border-amber-500/40 dark:bg-amber-500/15 dark:text-amber-100">
-            <span>Deleting this template… Undo within 5 seconds.</span>
-            <button type="button" className="font-medium text-cyan-700 underline dark:text-cyan-300" onClick={undoDelete}>
-              Undo
-            </button>
-          </div>
-        ) : null}
-
         <div className="flex flex-wrap items-center gap-3">
           <button type="button" className="btn-save-primary" onClick={() => void save.mutate()}>
             Save template
@@ -330,7 +307,7 @@ export function EmailTemplateEditorPage({ templateId }: { templateId: string }) 
             className="inline-flex rounded-lg p-2 text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/40"
             title="Delete template"
             disabled={remove.isPending}
-            onClick={() => void scheduleDelete()}
+            onClick={() => void deleteNow()}
           >
             <Trash2 className="h-5 w-5" />
           </button>

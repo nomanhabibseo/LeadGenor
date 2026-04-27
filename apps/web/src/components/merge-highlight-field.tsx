@@ -13,6 +13,43 @@ const unsubPillChild =
 
 type SelRange = { start: number; end: number };
 
+function findMergeTokenRange(text: string, idx: number): { start: number; end: number } | null {
+  if (!text || idx < 0 || idx > text.length) return null;
+  const open = text.lastIndexOf("{{", idx);
+  if (open < 0) return null;
+  // Always search for the closing braces from just after the opener.
+  // If the caret is inside the token (including on either of the `}` chars),
+  // searching from `idx` can miss the earlier `}}` start.
+  const close = text.indexOf("}}", open + 2);
+  if (close < 0) return null;
+  const start = open;
+  const end = close + 2;
+  if (idx < start || idx > end) return null;
+  return { start, end };
+}
+
+function tryAtomicDeleteMergeToken(
+  el: HTMLInputElement | HTMLTextAreaElement,
+  value: string,
+  onChange: (v: string) => void,
+  e: React.KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>,
+) {
+  if (e.key !== "Backspace" && e.key !== "Delete") return;
+  const s = el.selectionStart ?? 0;
+  const t = el.selectionEnd ?? 0;
+  if (s !== t) return;
+  const idx = e.key === "Backspace" ? Math.max(0, s - 1) : s;
+  const r = findMergeTokenRange(value, idx);
+  if (!r) return;
+  e.preventDefault();
+  const next = value.slice(0, r.start) + value.slice(r.end);
+  onChange(next);
+  queueMicrotask(() => {
+    el.focus();
+    el.setSelectionRange(r.start, r.start);
+  });
+}
+
 type MergeHighlightInputProps = Omit<
   React.InputHTMLAttributes<HTMLInputElement>,
   "value" | "onChange" | "children" | "className"
@@ -86,6 +123,11 @@ export function MergeHighlightInput({
             if (el) captureInputSelection(el, selectionRangeRef);
           });
         }}
+        onKeyDown={(e) => {
+          const el = inputRef.current;
+          if (el) tryAtomicDeleteMergeToken(el, value, onChange, e);
+          rest.onKeyDown?.(e);
+        }}
         onSelect={(e) => {
           captureInputSelection(e.currentTarget, selectionRangeRef);
           rest.onSelect?.(e);
@@ -151,6 +193,11 @@ type MergeHighlightTextareaProps = Omit<
   textareaRef: React.RefObject<HTMLTextAreaElement | null>;
   className?: string;
   selectionRangeRef?: MutableRefObject<SelRange>;
+  /**
+   * When true, renders as a normal textarea (no mirror overlay).
+   * This avoids occasional caret/render desync issues on some Windows setups.
+   */
+  plain?: boolean;
 };
 
 function captureTextareaSelection(el: HTMLTextAreaElement, ref?: MutableRefObject<SelRange>) {
@@ -167,6 +214,7 @@ export function MergeHighlightTextarea({
   textareaRef,
   className,
   selectionRangeRef,
+  plain,
   onScroll,
   ...rest
 }: MergeHighlightTextareaProps) {
@@ -184,6 +232,49 @@ export function MergeHighlightTextarea({
   useLayoutEffect(() => {
     syncScroll();
   }, [value, syncScroll]);
+
+  if (plain) {
+    return (
+      <textarea
+        ref={textareaRef}
+        {...rest}
+        value={value}
+        onChange={(e) => {
+          onChange(e.target.value);
+          queueMicrotask(() => {
+            const el = textareaRef.current;
+            if (el) captureTextareaSelection(el, selectionRangeRef);
+          });
+        }}
+        onKeyDown={(e) => {
+          const el = textareaRef.current;
+          if (el) tryAtomicDeleteMergeToken(el, value, onChange, e);
+          rest.onKeyDown?.(e);
+        }}
+        onSelect={(e) => {
+          captureTextareaSelection(e.currentTarget, selectionRangeRef);
+          rest.onSelect?.(e);
+        }}
+        onBlur={(e) => {
+          captureTextareaSelection(e.currentTarget, selectionRangeRef);
+          rest.onBlur?.(e);
+        }}
+        onKeyUp={(e) => {
+          captureTextareaSelection(e.currentTarget, selectionRangeRef);
+          rest.onKeyUp?.(e);
+        }}
+        onMouseUp={(e) => {
+          captureTextareaSelection(e.currentTarget, selectionRangeRef);
+          rest.onMouseUp?.(e);
+        }}
+        className={cn(
+          "min-h-[240px] w-full resize-y rounded-xl border border-slate-200 bg-white px-3 py-3 font-sans text-sm leading-relaxed text-slate-900 shadow-sm transition hover:border-sky-400 focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-500/25 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 dark:hover:border-sky-500/50 dark:focus:border-sky-400 dark:focus:ring-sky-500/30",
+          className,
+        )}
+        spellCheck={rest.spellCheck ?? true}
+      />
+    );
+  }
 
   return (
     <div
@@ -217,6 +308,11 @@ export function MergeHighlightTextarea({
             const el = textareaRef.current;
             if (el) captureTextareaSelection(el, selectionRangeRef);
           });
+        }}
+        onKeyDown={(e) => {
+          const el = textareaRef.current;
+          if (el) tryAtomicDeleteMergeToken(el, value, onChange, e);
+          rest.onKeyDown?.(e);
         }}
         onSelect={(e) => {
           captureTextareaSelection(e.currentTarget, selectionRangeRef);

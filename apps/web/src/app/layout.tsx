@@ -16,8 +16,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "LeadGenor",
-  description: "Guest post management SaaS",
+  title: "LeadGenor – Guest Posting CRM & Cold Email Outreach Platform.",
+  description:
+    "Manage guest post vendors, clients and orders in one place. Automate cold email outreach, find emails, and run drip campaigns 10x faster than Google Sheets.",
   icons: [{ rel: "icon", url: LOGO_PATH }],
 };
 

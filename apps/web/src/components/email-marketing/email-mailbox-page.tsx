@@ -2,8 +2,9 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { useSession } from "next-auth/react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { FileEdit, Inbox, RefreshCw, Send } from "lucide-react";
 import { useAppDialog } from "@/contexts/app-dialog-context";
 import { apiFetch } from "@/lib/api";
@@ -43,6 +44,7 @@ function folderBadge(folder: string) {
 }
 
 export function EmailMailboxPage() {
+  const searchParams = useSearchParams();
   const { data: session, status } = useSession();
   const token = session?.accessToken;
   const userKey = sessionQueryUserKey(session);
@@ -50,6 +52,7 @@ export function EmailMailboxPage() {
   const { showAlert } = useAppDialog();
   const [accountId, setAccountId] = useState<string>("");
   const [folder, setFolder] = useState<(typeof FOLDERS)[number]["id"]>("inbox");
+  const [autoSynced, setAutoSynced] = useState(false);
 
   const { data: accounts = [], isError: accountsError, error: accountsErr, refetch: refetchAccounts } = useQuery({
     queryKey: ["email-accounts", userKey],
@@ -104,6 +107,25 @@ export function EmailMailboxPage() {
     },
     onError: (e: Error) => void showAlert(e.message),
   });
+
+  // Allow deep-link from Reports: /email-marketing/mailbox?accountId=...&autoSync=1
+  useEffect(() => {
+    const qAccountId = (searchParams.get("accountId") ?? "").trim();
+    if (!qAccountId) return;
+    if (!accounts.some((a) => a.id === qAccountId)) return;
+    setAccountId((cur) => (cur ? cur : qAccountId));
+  }, [accounts, searchParams]);
+
+  useEffect(() => {
+    const auto = (searchParams.get("autoSync") ?? "").trim();
+    if (auto !== "1") return;
+    if (!accountId) return;
+    if (autoSynced) return;
+    if (!syncableAccounts.some((a) => a.id === accountId)) return;
+    setAutoSynced(true);
+    void sync.mutateAsync();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally one-shot via autoSynced
+  }, [accountId, autoSynced, searchParams, syncableAccounts]);
 
   if (status === "loading") {
     return <div className="em-page mx-auto max-w-5xl p-8 text-slate-500">Loading…</div>;

@@ -7,7 +7,6 @@ import { useEffect, useMemo, useState } from "react";
 import {
   Clock,
   Eye,
-  LayoutList,
   Loader2,
   Pencil,
   Play,
@@ -155,13 +154,7 @@ function CampaignStatusPill({ status }: { status: string }) {
   );
 }
 
-const STATUS_FILTERS = ["all", "DRAFT", "SCHEDULED", "RUNNING", "PAUSED", "COMPLETED"] as const;
-type StatusFilter = (typeof STATUS_FILTERS)[number];
-
-const SORTS = [
-  { id: "recent" as const, label: "Recent" },
-  { id: "name" as const, label: "Name (A–Z)" },
-] as const;
+type StatusFilter = "all" | "DRAFT" | "SCHEDULED" | "RUNNING" | "PAUSED" | "COMPLETED";
 
 export function EmailCampaignsPage() {
   const { data: session, status } = useSession();
@@ -172,7 +165,6 @@ export function EmailCampaignsPage() {
   const [deletedNote, setDeletedNote] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
-  const [sortBy, setSortBy] = useState<"recent" | "name">("recent");
   const [listPage, setListPage] = useState(1);
 
   const { data: rows = [], isError, error, refetch, isFetching } = useQuery({
@@ -199,16 +191,13 @@ export function EmailCampaignsPage() {
     if (statusFilter !== "all") {
       list = list.filter((c) => c.status === statusFilter);
     }
-    list.sort((a, b) => {
-      if (sortBy === "name") return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
-      return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
-    });
+    list.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
     return list;
-  }, [rows, search, statusFilter, sortBy]);
+  }, [rows, search, statusFilter]);
 
   useEffect(() => {
     setListPage(1);
-  }, [search, statusFilter, sortBy]);
+  }, [search, statusFilter]);
 
   const listTotal = displayRows.length;
   const totalListPages = Math.max(1, Math.ceil(listTotal / CAMPAIGNS_PAGE_SIZE));
@@ -359,20 +348,6 @@ export function EmailCampaignsPage() {
               <option value="COMPLETED">Completed</option>
             </select>
           </div>
-          <div className="relative min-w-0 sm:min-w-[9.5rem]">
-            <LayoutList className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
-            <select
-              className="em-btn-outline h-9 w-full min-w-0 cursor-pointer appearance-none rounded-xl border-slate-200 py-0 pl-8 pr-3 text-sm dark:border-slate-600"
-              value={sortBy}
-              onChange={(e) => setSortBy(e.target.value as "recent" | "name")}
-            >
-              {SORTS.map((s) => (
-                <option key={s.id} value={s.id}>
-                  Sort: {s.label}
-                </option>
-              ))}
-            </select>
-          </div>
           <Link
             href="/email-marketing/campaigns/new"
             className="em-btn-primary inline-flex h-9 items-center justify-center gap-1.5 whitespace-nowrap px-4"
@@ -393,9 +368,10 @@ export function EmailCampaignsPage() {
           {rows.length === 0 ? "No campaigns yet. Create your first campaign to get started." : "No campaigns match your filters."}
         </div>
       ) : (
-        <ul className="space-y-2">
-          {pagedRows.map((c) => {
+        <ul className="space-y-4">
+          {pagedRows.map((c, i) => {
             const created = new Date(c.createdAt);
+            const rowNo = rangeFrom + i;
             const leftAccent =
               c.status === "COMPLETED"
                 ? "from-emerald-200/80 to-white"
@@ -406,15 +382,18 @@ export function EmailCampaignsPage() {
             const primaryBtn =
               "inline-flex items-center justify-center gap-1 rounded-md border border-transparent bg-transparent px-2 py-1 text-xs font-semibold shadow-none transition-colors disabled:opacity-50";
             return (
-              <li
-                key={c.id}
-                tabIndex={0}
-                className={cn(
-                  "group em-surface-hover overflow-hidden rounded-xl border border-slate-200/90 bg-white shadow-sm",
-                  "focus-within:outline-none dark:border-slate-700 dark:bg-slate-800/50",
-                )}
-              >
-                <div className="grid grid-cols-1 gap-2 border-b border-slate-900/[0.08] p-2.5 sm:grid-cols-[auto_minmax(0,1.15fr)_minmax(0,1fr)_minmax(7rem,auto)_1fr] sm:items-center sm:gap-3 dark:border-white/[0.1]">
+              <li key={c.id} className="flex items-stretch gap-3">
+                <div className="w-10 shrink-0 pt-3 text-center text-sm font-semibold tabular-nums text-slate-500 dark:text-slate-400">
+                  {rowNo}
+                </div>
+                <div
+                  tabIndex={0}
+                  className={cn(
+                    "group em-surface-hover min-w-0 flex-1 overflow-hidden rounded-xl border border-slate-200/90 bg-white shadow-sm",
+                    "focus-within:outline-none dark:border-slate-700 dark:bg-slate-800/50",
+                  )}
+                >
+                <div className="grid grid-cols-1 gap-2 border-b border-violet-200/70 p-2.5 sm:grid-cols-[auto_minmax(0,1.15fr)_minmax(0,1fr)_minmax(7rem,auto)_1fr] sm:items-center sm:gap-3 dark:border-violet-800/40">
                   <div
                     className={cn(
                       "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br to-white ring-1 ring-slate-200/80 dark:ring-slate-600",
@@ -523,7 +502,7 @@ export function EmailCampaignsPage() {
                           }
                         >
                           {start.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
-                          Start
+                          Run Campaign
                         </button>
                       ) : null}
                       {c.status === "RUNNING" ? (
@@ -568,6 +547,7 @@ export function EmailCampaignsPage() {
                       <Trash2 className="h-4 w-4" />
                     </button>
                   </div>
+                </div>
                 </div>
               </li>
             );

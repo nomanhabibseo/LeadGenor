@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowUpDown, CheckCircle2, Mail, Pencil, Plus, Search, Trash2 } from "lucide-react";
+import { CheckCircle2, Pencil, Plus, Search, Trash2 } from "lucide-react";
 import { useAppDialog } from "@/contexts/app-dialog-context";
 import { apiFetch } from "@/lib/api";
 import { sessionQueryUserKey } from "@/lib/session-query-scope";
@@ -62,7 +62,6 @@ export function EmailAccountsPage() {
   const [search, setSearch] = useState("");
   const [listPage, setListPage] = useState(1);
   const [campaignsToggleId, setCampaignsToggleId] = useState<string | null>(null);
-  const [accountSort, setAccountSort] = useState<"name_asc" | "name_desc" | "sent_desc">("name_asc");
 
   useEffect(() => {
     const oauth = searchParams.get("oauth");
@@ -118,26 +117,19 @@ export function EmailAccountsPage() {
     return accounts.filter(
       (a) =>
         a.displayName.toLowerCase().includes(q) ||
-        a.fromEmail.toLowerCase().includes(q) ||
         a.tag.toLowerCase().includes(q),
     );
   }, [accounts, search]);
 
   const sortedAccounts = useMemo(() => {
     const list = [...filteredAccounts];
-    if (accountSort === "name_asc") {
-      list.sort((a, b) => a.displayName.localeCompare(b.displayName, undefined, { sensitivity: "base" }));
-    } else if (accountSort === "name_desc") {
-      list.sort((a, b) => b.displayName.localeCompare(a.displayName, undefined, { sensitivity: "base" }));
-    } else {
-      list.sort((a, b) => (b.sentToday ?? 0) - (a.sentToday ?? 0) || a.displayName.localeCompare(b.displayName));
-    }
+    list.sort((a, b) => a.displayName.localeCompare(b.displayName, undefined, { sensitivity: "base" }));
     return list;
-  }, [filteredAccounts, accountSort]);
+  }, [filteredAccounts]);
 
   useEffect(() => {
     setListPage(1);
-  }, [search, accountSort]);
+  }, [search]);
 
   const listTotal = sortedAccounts.length;
   const totalListPages = Math.max(1, Math.ceil(listTotal / ACCOUNTS_PAGE_SIZE));
@@ -200,26 +192,13 @@ export function EmailAccountsPage() {
             <input
               type="search"
               className="table-toolbar-search w-full pl-9"
-              placeholder="Search by name, email, or tag…"
+              placeholder="Search by account name, tag name…"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               autoComplete="off"
             />
           </div>
           <div className="flex flex-wrap items-center gap-2 sm:shrink-0 sm:ms-auto">
-            <div className="relative min-w-0 sm:min-w-[10.5rem]">
-              <ArrowUpDown className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
-              <select
-                className="em-btn-outline h-9 w-full cursor-pointer appearance-none rounded-xl border-slate-200 py-0 pl-8 pr-3 text-sm dark:border-slate-600"
-                value={accountSort}
-                onChange={(e) => setAccountSort(e.target.value as typeof accountSort)}
-                aria-label="Sort accounts"
-              >
-                <option value="name_asc">Sort: A–Z</option>
-                <option value="name_desc">Sort: Z–A</option>
-                <option value="sent_desc">Sort: Sent today (high–low)</option>
-              </select>
-            </div>
             <Link href="/email-marketing/accounts/add" className="em-btn-primary inline-flex h-9 items-center gap-2 whitespace-nowrap px-4">
               <Plus className="h-4 w-4" aria-hidden />
               Add account
@@ -262,14 +241,17 @@ export function EmailAccountsPage() {
       ) : (
         <>
           <ul className="space-y-4">
-            {pagedAccounts.map((a) => {
+            {pagedAccounts.map((a, i) => {
               const forCampaigns = a.campaignsEnabled !== false;
+              const rowNo = rangeFrom + i;
               return (
                 <li key={a.id} className="em-card em-surface-hover">
                   <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
                     <div className="flex min-w-0 flex-1 gap-4">
                       <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-indigo-600 text-white shadow-md dark:bg-indigo-500">
-                        <Mail className="h-7 w-7" aria-hidden />
+                        <span className="text-sm font-extrabold tabular-nums" title={`#${rowNo}`}>
+                          #{rowNo}
+                        </span>
                       </div>
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-x-2 gap-y-1">

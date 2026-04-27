@@ -9,6 +9,7 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { EmailImapSyncService } from './email-imap-sync.service';
 import { EmailOAuthMailService } from './email-oauth-mail.service';
+import { NotificationsService } from '../notifications/notifications.service';
 
 function parseSenderAccountIds(raw: unknown): string[] {
   if (Array.isArray(raw)) {
@@ -46,6 +47,7 @@ export class CampaignReplyDetectionService {
     private readonly prisma: PrismaService,
     private readonly oauthMail: EmailOAuthMailService,
     private readonly imapSync: EmailImapSyncService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   @Interval(90_000)
@@ -104,6 +106,8 @@ export class CampaignReplyDetectionService {
           replied: false,
           campaignId: { in: campaignIds },
           targetEmail: { equals: emailNorm, mode: 'insensitive' },
+          // Only mark replies for recipients we've actually sent to.
+          lastSentAt: { not: null },
           status: {
             in: [
               CampaignRecipientStatus.PENDING,
@@ -116,6 +120,16 @@ export class CampaignReplyDetectionService {
       });
       if (n.count > 0) {
         this.log.log(`Marked ${n.count} recipient(s) as replied (from ${emailNorm}, account ${acc.id}).`);
+        await this.notifications.create(acc.userId, {
+          kind: 'info',
+          title: 'New reply received',
+          message: [
+            `Account: ${acc.fromEmail}`,
+            `From: ${emailNorm}`,
+            `Matched recipient(s): ${n.count}`,
+          ].join('\n'),
+          href: `/email-marketing/mailbox?accountId=${encodeURIComponent(acc.id)}&autoSync=1`,
+        });
       }
     }
   }

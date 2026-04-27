@@ -22,8 +22,6 @@ const MODULE_ROWS: { key: TrashModuleKey; label: string }[] = [
   { key: "orders", label: "Orders" },
   { key: "lists", label: "My lists" },
   { key: "templates", label: "Templates" },
-  { key: "emailAccounts", label: "Email accounts" },
-  { key: "campaigns", label: "Campaigns" },
 ];
 
 function TrashToggleRow({
@@ -87,7 +85,7 @@ export default function SettingsPage() {
   });
 
   const [toggles, setToggles] = useState<Record<TrashModuleKey, boolean>>(defaultTrashToggles);
-  const [daysStr, setDaysStr] = useState("");
+  const [daysStr, setDaysStr] = useState("7");
   const [busyKey, setBusyKey] = useState<TrashModuleKey | null>(null);
   const [retentionSaving, setRetentionSaving] = useState(false);
   const [themeBusy, setThemeBusy] = useState<ThemePreference | null>(null);
@@ -125,8 +123,8 @@ export default function SettingsPage() {
   async function saveRetention() {
     if (!token) return;
     const n = Number(daysStr);
-    if (!Number.isFinite(n) || n < 1 || n > 365) {
-      void showAlert("Enter a number of days between 1 and 365.");
+    if (!Number.isFinite(n) || n < 1 || n > 30) {
+      void showAlert("Enter a number of days between 1 and 30.");
       return;
     }
     setRetentionSaving(true);
@@ -236,13 +234,13 @@ export default function SettingsPage() {
 
       <FormSectionCard title="Trash retention">
         <p className="text-xs text-slate-600 dark:text-slate-400">
-          After this many days in trash, items are permanently removed (minimum 1 day).
+          After this many days in trash, items are permanently removed (minimum 1 day, maximum 30 days).
         </p>
         <div className="flex flex-wrap items-center gap-2 pt-1">
           <input
             type="number"
             min={1}
-            max={365}
+            max={30}
             className="w-28 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100"
             value={daysStr}
             onChange={(e) => setDaysStr(e.target.value)}

@@ -4,23 +4,19 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useSession } from "next-auth/react";
-import { Check, Loader2, Trash2, X } from "lucide-react";
+import { Check, Loader2, X } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useAppDialog } from "@/contexts/app-dialog-context";
 import { apiFetch } from "@/lib/api";
+import { pushNotification } from "@/lib/notifications";
 import { sessionQueryUserKey } from "@/lib/session-query-scope";
-import { NativeNumberInput } from "@/components/native-number-input";
 import { SequenceFlowEditor } from "@/components/email-marketing/sequence-flow-editor";
 import { FormSwitch } from "@/components/ui/form-switch";
 import {
   chainStepsToMainFlow,
   compileMainFlowToChain,
   defaultFollowUi,
-  flattenFlowSteps,
-  followUiToChain,
-  parseFollowUi,
   type ChainStep,
-  type FollowUiState,
   type MainFlowStep,
 } from "@/lib/campaign-flow";
 
@@ -51,13 +47,20 @@ type Campaign = {
   scheduledAt: string | null;
   checkListEntries?: unknown;
   pauseReason?: string | null;
+  startedAt?: string | null;
 };
 
 type EmailList = { id: string; name: string };
-type Account = { id: string; displayName: string; tag: string; campaignsEnabled?: boolean };
+type Account = {
+  id: string;
+  displayName: string;
+  tag: string;
+  campaignsEnabled?: boolean;
+  connectionStatus?: string | null;
+};
 type Tpl = { id: string; name: string; folder: { name: string } };
 
-const STEP_LABELS = ["Basics", "Senders", "Sequence", "Follow-Ups", "Schedule", "Review"] as const;
+const STEP_LABELS = ["Basics", "Senders", "Sequence", "Schedule", "Review"] as const;
 
 const wizardBackLinkClass =
   "text-sm font-medium text-emerald-600 transition hover:text-emerald-700 hover:underline dark:text-emerald-400 dark:hover:text-emerald-300";
@@ -104,7 +107,7 @@ function CreateCampaignStepper({ currentStep, heading }: { currentStep: number; 
                       </span>
                     )}
                   </div>
-                  {n < 6 ? (
+                  {n < 5 ? (
                     <div
                       className={`h-px min-w-[6px] max-w-10 flex-1 rounded-full sm:max-w-12 ${
                         lineDone(n) ? "bg-emerald-500" : "bg-slate-200 dark:bg-slate-600"
@@ -145,15 +148,6 @@ function isMainFlowGraph(x: unknown): x is MainFlowStep[] {
   return Array.isArray(x) && x.length > 0 && typeof (x[0] as MainFlowStep)?.t === "string";
 }
 
-function FlowArrowDown() {
-  return (
-    <div className="flex flex-col items-center py-2" aria-hidden>
-      <div className="h-7 w-0.5 rounded-full bg-slate-500 dark:bg-slate-400" />
-      <div className="h-0 w-0 border-x-[6px] border-x-transparent border-t-[7px] border-t-slate-500 dark:border-t-slate-400" />
-    </div>
-  );
-}
-
 function FlowReviewTree({
   steps,
   templates,
@@ -191,23 +185,20 @@ function FlowReviewTree({
           ) : (
             <div className="space-y-1.5">
               <div>
-                <span className="font-semibold text-pink-800 dark:text-pink-300">Condition</span>
+                <span className="font-semibold text-fuchsia-800 dark:text-fuchsia-300">Follow-Ups</span>
                 <span className="text-slate-500 dark:text-slate-400"> — </span>
-                <span className="font-semibold text-slate-800 dark:text-slate-100">Opened email</span>
-                <span className="text-slate-600 dark:text-slate-400"> — after open, wait {s.waitDays ?? 3}d, then branch.</span>
+                <span className="text-slate-600 dark:text-slate-400">
+                  Wait {s.waitDays ?? 0}d after the {(s.afterEmailIndex ?? 0) + 1}th main email, then split.
+                </span>
               </div>
               <div className="space-y-0.5">
-                <div className="font-semibold text-emerald-700 dark:text-emerald-400">Yes path</div>
-                <p className="text-[11px] leading-snug text-slate-600 dark:text-slate-400">
-                  Opened prior emails, clicked a link, no reply — steps below run after the wait.
-                </p>
+                <div className="font-semibold text-emerald-700 dark:text-emerald-400">Opened but not replied</div>
+                <p className="text-[11px] leading-snug text-slate-600 dark:text-slate-400">Opened, no reply yet.</p>
                 <FlowReviewTree steps={s.yes} templates={templates} depth={depth + 1} />
               </div>
               <div className="space-y-0.5">
-                <div className="font-semibold text-red-700 dark:text-red-400">No path</div>
-                <p className="text-[11px] leading-snug text-slate-600 dark:text-slate-400">
-                  Opened but did not click a link — steps below run after the wait.
-                </p>
+                <div className="font-semibold text-rose-700 dark:text-rose-400">Not opened</div>
+                <p className="text-[11px] leading-snug text-slate-600 dark:text-slate-400">Delivered, not opened.</p>
                 <FlowReviewTree steps={s.no} templates={templates} depth={depth + 1} />
               </div>
             </div>
@@ -218,6 +209,27 @@ function FlowReviewTree({
   );
 }
 
+const FOLLOWUP_CONFIG_ALERT =
+  'First select after which email the follow-ups should start and how many days to wait. Go to the "Follow-Ups" field and select the email and wait days.';
+
+function sequenceBlocksContinue(flow: MainFlowStep[]): string | null {
+  for (const s of flow) {
+    if (s.t === "email" && !s.templateId.trim()) {
+      return "Select an email template for every email in the sequence before continuing.";
+    }
+    if (s.t === "condition") {
+      if (s.kind !== "opened_email" && !s.configComplete) {
+        return FOLLOWUP_CONFIG_ALERT;
+      }
+      const a = sequenceBlocksContinue(s.yes);
+      if (a) return a;
+      const b = sequenceBlocksContinue(s.no);
+      if (b) return b;
+    }
+  }
+  return null;
+}
+
 export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) {
   const router = useRouter();
   const { data: session } = useSession();
@@ -225,11 +237,12 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
   const userKey = sessionQueryUserKey(session);
   const qc = useQueryClient();
   const { showAlert, showConfirm } = useAppDialog();
-  const [situationModalOpen, setSituationModalOpen] = useState(false);
   const [step, setStep] = useState(1);
   const [ignoreSchedule, setIgnoreSchedule] = useState(true);
   const [scheduleLocal, setScheduleLocal] = useState("");
   const [senderPickerOpen, setSenderPickerOpen] = useState(false);
+  const [reviewAction, setReviewAction] = useState<null | "save" | "run" | "schedule">(null);
+  const [newRunPending, setNewRunPending] = useState(false);
 
   const { data: camp } = useQuery({
     queryKey: ["campaign", userKey, campaignId],
@@ -265,7 +278,6 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
   const [listId, setListId] = useState("");
   const [senders, setSenders] = useState<string[]>([]);
   const [mainFlow, setMainFlow] = useState<MainFlowStep[]>([]);
-  const [followUi, setFollowUi] = useState<FollowUiState>(defaultFollowUi());
   const [flags, setFlags] = useState({
     doNotSendUnverified: false,
     doNotSendRisky: false,
@@ -278,14 +290,46 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
     dailyCampaignLimit: "" as string | number,
   });
 
-  const mainCompiled = useMemo(() => compileMainFlowToChain(mainFlow), [mainFlow]);
-  const mainEmailCount = mainCompiled.length;
+  async function warnIfSenderProblems() {
+    if (!senders.length) return;
+    const picked = senders.map((id) => accounts.find((a) => a.id === id)).filter(Boolean) as Account[];
+    const missing = senders.filter((id) => !accounts.some((a) => a.id === id));
+    const problems: string[] = [];
+    for (const a of picked) {
+      if (a.campaignsEnabled === false) {
+        problems.push(`"${a.displayName}" is disabled for campaigns.`);
+      }
+      if (String(a.connectionStatus ?? "").toLowerCase() === "invalid") {
+        problems.push(`"${a.displayName}" connection is invalid.`);
+      }
+    }
+    for (const id of missing) problems.push(`Sender account not found (${id}).`);
+    if (!problems.length) return;
+
+    const message =
+      "This campaign is using one or more sender accounts with problems:\n\n" +
+      problems.map((p) => `- ${p}`).join("\n") +
+      "\n\nFix: Email marketing → Email accounts.";
+
+    await showAlert(message);
+    await pushNotification(token, {
+      kind: "warning",
+      title: "Sender account issue detected",
+      message,
+      href: "/email-marketing/accounts",
+    });
+  }
 
   useEffect(() => {
     if (!camp) return;
     setName(camp.name);
     setListId(camp.emailListId);
-    setStep(camp.wizardStep || 1);
+    {
+      const w = camp.wizardStep || 1;
+      // `wizardStep` is 1-based and matches the UI steps:
+      // 1 Basics, 2 Senders, 3 Sequence, 4 Schedule, 5 Review
+      setStep(Math.min(5, Math.max(1, w)));
+    }
     setSenders((camp.senderAccountIds as string[]) ?? []);
     let graph: MainFlowStep[];
     if (isMainFlowGraph(camp.mainFlowGraph)) {
@@ -295,8 +339,6 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
       graph = chain.length ? chainStepsToMainFlow(chain) : [];
     }
     setMainFlow(graph);
-    const chainLen = compileMainFlowToChain(graph).length;
-    setFollowUi(parseFollowUi(camp.followUpStartRule, Math.max(1, chainLen)));
     setFlags({
       doNotSendUnverified: camp.doNotSendUnverified,
       doNotSendRisky: camp.doNotSendRisky,
@@ -318,20 +360,18 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
   }, [camp]);
 
   useEffect(() => {
-    setFollowUi((prev) => ({
-      notOpened: {
-        ...prev.notOpened,
-        anchorEmailIndex: Math.min(prev.notOpened.anchorEmailIndex, Math.max(0, mainEmailCount - 1)),
-      },
-      openedNoAction: {
-        ...prev.openedNoAction,
-        anchorEmailIndex: Math.min(prev.openedNoAction.anchorEmailIndex, Math.max(0, mainEmailCount - 1)),
-      },
-    }));
-  }, [mainEmailCount]);
+    if (step !== 4 || ignoreSchedule) return;
+    if (scheduleLocal.trim()) return;
+    const t = new Date();
+    t.setTime(t.getTime() + 12 * 60 * 60 * 1000);
+    setScheduleLocal(toLocalInput(t.toISOString()));
+  }, [step, ignoreSchedule]);
 
-  /** New campaign route: no row exists until the first successful save (e.g. Next from step 1). */
+  /** New campaign route: keep everything local until Step 5 Save/Run/Schedule. */
   const isNewCampaign = campaignId === "new";
+
+  /** Running → paused: resume continues existing sends; only daily campaign cap may be edited. */
+  const isPausedFromRunning = Boolean(camp?.status === "PAUSED" && camp?.startedAt);
 
   useEffect(() => {
     if (!isNewCampaign || !lists.length) return;
@@ -340,22 +380,6 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
 
   const save = useMutation({
     mutationFn: async (body: Record<string, unknown>) => {
-      if (isNewCampaign) {
-        const created = await apiFetch<{ id: string }>("/email-marketing/campaigns", token, {
-          method: "POST",
-          body: JSON.stringify({
-            name: typeof body.name === "string" && body.name.trim() ? body.name.trim() : undefined,
-          }),
-        });
-        await apiFetch(`/email-marketing/campaigns/${created.id}`, token, {
-          method: "PATCH",
-          body: JSON.stringify(body),
-        });
-        void qc.invalidateQueries({ queryKey: ["campaigns", userKey] });
-        void qc.invalidateQueries({ queryKey: ["campaign", userKey, created.id] });
-        router.replace(`/email-marketing/campaigns/${created.id}`);
-        return created;
-      }
       return apiFetch(`/email-marketing/campaigns/${campaignId}`, token, {
         method: "PATCH",
         body: JSON.stringify(body),
@@ -365,6 +389,22 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
       if (!isNewCampaign) void qc.invalidateQueries({ queryKey: ["campaign", userKey, campaignId] });
     },
   });
+
+  async function createAndSaveNewCampaign(payload: Record<string, unknown>) {
+    const created = await apiFetch<{ id: string }>("/email-marketing/campaigns", token, {
+      method: "POST",
+      body: JSON.stringify({
+        name: typeof payload.name === "string" && payload.name.trim() ? payload.name.trim() : undefined,
+      }),
+    });
+    await apiFetch(`/email-marketing/campaigns/${created.id}`, token, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    });
+    void qc.invalidateQueries({ queryKey: ["campaigns", userKey] });
+    void qc.invalidateQueries({ queryKey: ["campaign", userKey, created.id] });
+    return created.id;
+  }
 
   const build = useMutation({
     mutationFn: () =>
@@ -376,10 +416,10 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
   });
 
   const startCamp = useMutation({
-    mutationFn: (skipRecipientBuild: boolean) =>
+    mutationFn: (body: { skipRecipientBuild: boolean; scheduledAt?: string | null }) =>
       apiFetch(`/email-marketing/campaigns/${campaignId}/start`, token, {
         method: "POST",
-        body: JSON.stringify({ skipRecipientBuild }),
+        body: JSON.stringify(body),
       }),
     onError: (e: Error) => void showAlert(e.message),
   });
@@ -390,6 +430,10 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
         method: "POST",
         body: JSON.stringify({ reason: reason ?? "" }),
       }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["campaign", userKey, campaignId] });
+      void qc.invalidateQueries({ queryKey: ["campaigns", userKey] });
+    },
   });
 
   const remove = useMutation({
@@ -408,16 +452,7 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
 
   function buildBody(wizardStep: number): Record<string, unknown> {
     const mainSeq = compileMainFlowToChain(mainFlow);
-    const extFirst = compileMainFlowToChain(followUi.notOpened.extensionFlow ?? [])[0];
-    const followRule: FollowUiState = {
-      ...followUi,
-      notOpened: {
-        ...followUi.notOpened,
-        templateId: extFirst?.templateId ?? followUi.notOpened.templateId,
-      },
-      openedNoAction: { ...followUi.openedNoAction, enabled: false },
-    };
-    const followSeq = followUiToChain(followRule);
+    const followRule = defaultFollowUi();
     return {
       name,
       emailListId: listId,
@@ -425,10 +460,10 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
       senderAccountIds: senders,
       mainSequence: mainSeq,
       mainFlowGraph: mainFlow,
-      followUpSequence: followSeq,
+      followUpSequence: [],
       followUpStartRule: followRule,
       ...flags,
-      stopFollowUpsOnReply: followUi.notOpened.enabled && flags.stopFollowUpsOnReply,
+      stopFollowUpsOnReply: flags.stopFollowUpsOnReply,
       dailyCampaignLimit: (() => {
         if (flags.dailyCampaignLimit === "") return null;
         const n = Number(flags.dailyCampaignLimit);
@@ -440,7 +475,9 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
   }
 
   async function persistStep(nextStep: number) {
-    await save.mutateAsync(buildBody(nextStep));
+    if (!isNewCampaign && !isPausedFromRunning) {
+      await save.mutateAsync(buildBody(nextStep));
+    }
     setStep(nextStep);
   }
 
@@ -465,31 +502,15 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
         await showAlert("Complete this step to continue to the next one. Add at least one email template to the sequence.");
         return false;
       }
-      return true;
-    }
-    if (s === 4) {
-      if (followUi.notOpened.enabled) {
-        if (!followUi.notOpened.situationSaved) {
-          await showAlert(
-            'Complete follow-ups: save the follow-up situation (wait + anchor email), or turn the follow-up off.',
-          );
-          return false;
-        }
-        const extIncomplete = (flow: MainFlowStep[]) =>
-          flattenFlowSteps(flow).some((x) => x.t === "email" && !x.templateId.trim());
-        const ext = compileMainFlowToChain(followUi.notOpened.extensionFlow ?? []);
-        if (!ext.length) {
-          await showAlert('Add at least one step to the follow-up sequence (use "+ Add next step" below the situation).');
-          return false;
-        }
-        if (extIncomplete(followUi.notOpened.extensionFlow ?? [])) {
-          await showAlert("Complete the follow-up sequence: every Email step needs a template selected.");
-          return false;
-        }
+      const block = sequenceBlocksContinue(mainFlow);
+      if (block) {
+        await showAlert(block);
+        return false;
       }
       return true;
     }
-    if (s === 5) {
+    if (s === 4) {
+      if (isPausedFromRunning) return true;
       if (!ignoreSchedule && !scheduleLocal) {
         await showAlert(
           'Complete this step to continue. Either turn on "Start campaign now and ignore schedule" or pick a schedule date and time.',
@@ -503,33 +524,75 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
 
   async function persistBack() {
     const prev = Math.max(1, step - 1);
-    await save.mutateAsync(buildBody(prev));
+    if (!isNewCampaign && !isPausedFromRunning) {
+      await save.mutateAsync(buildBody(prev));
+    }
     setStep(prev);
   }
 
   async function goNext() {
     if (!(await validateStep(step))) return;
-    if (step >= 6) return;
+    if (step >= 5) return;
     const next = step + 1;
-    await persistStep(next);
+    try {
+      await persistStep(next);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Could not save this step. Please try again.";
+      await showAlert(msg);
+    }
   }
 
   async function saveCampaignFinalize() {
-    for (let s = 1; s <= 5; s++) {
+    for (let s = 1; s <= 4; s++) {
       if (!(await validateStep(s))) return;
     }
-    const payload: Record<string, unknown> = buildBody(6);
-    if (camp?.status === "DRAFT") payload.status = "DRAFT";
-    await save.mutateAsync(payload);
+    const payload: Record<string, unknown> = buildBody(5);
+    // Save-only action: keep in DRAFT and do not start sending.
+    payload.status = "DRAFT";
+    if (isNewCampaign) {
+      await createAndSaveNewCampaign(payload);
+    } else {
+      await save.mutateAsync(payload);
+    }
     void qc.invalidateQueries({ queryKey: ["campaigns", userKey] });
     router.push("/email-marketing/campaigns");
     router.refresh();
   }
 
-  async function saveAndLaunchCampaign() {
-    for (let s = 1; s <= 5; s++) {
+  async function saveScheduleOnly() {
+    for (let s = 1; s <= 4; s++) {
       if (!(await validateStep(s))) return;
     }
+    await warnIfSenderProblems();
+    const payload: Record<string, unknown> = buildBody(5);
+    payload.status = "SCHEDULED";
+    if (isNewCampaign) {
+      const id = await createAndSaveNewCampaign(payload);
+      await apiFetch(`/email-marketing/campaigns/${id}/start`, token, {
+        method: "POST",
+        body: JSON.stringify({
+          skipRecipientBuild: false,
+          scheduledAt: typeof payload.scheduledAt === "string" ? (payload.scheduledAt as string) : undefined,
+        }),
+      });
+    } else {
+      await save.mutateAsync(payload);
+      await startCamp.mutateAsync({
+        skipRecipientBuild: false,
+        scheduledAt: typeof payload.scheduledAt === "string" ? (payload.scheduledAt as string) : undefined,
+      });
+    }
+    void qc.invalidateQueries({ queryKey: ["campaigns", userKey] });
+    if (!isNewCampaign) void qc.invalidateQueries({ queryKey: ["campaign", userKey, campaignId] });
+    router.push("/email-marketing/campaigns");
+    router.refresh();
+  }
+
+  async function saveAndLaunchCampaign() {
+    for (let s = 1; s <= 4; s++) {
+      if (!(await validateStep(s))) return;
+    }
+    await warnIfSenderProblems();
     if (camp?.status === "RUNNING") {
       await showAlert("Campaign is already running.");
       return;
@@ -538,16 +601,85 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
       await showAlert("This campaign is already completed.");
       return;
     }
-    const payload: Record<string, unknown> = buildBody(6);
+    const payload: Record<string, unknown> = buildBody(5);
     if (camp?.status === "DRAFT") payload.status = "DRAFT";
-    await save.mutateAsync(payload);
+    const id = isNewCampaign ? await createAndSaveNewCampaign(payload) : campaignId;
+    const resumePausedRunning = camp?.status === "PAUSED" && camp.startedAt;
+    if (!isNewCampaign && !resumePausedRunning) {
+      await save.mutateAsync(payload);
+    }
     const skipRecipientBuild =
       camp?.status === "PAUSED" && Array.isArray(camp.recipients) && camp.recipients.length > 0;
-    await startCamp.mutateAsync(skipRecipientBuild);
+    if (isNewCampaign) {
+      setNewRunPending(true);
+      try {
+        await apiFetch(`/email-marketing/campaigns/${id}/start`, token, {
+          method: "POST",
+          body: JSON.stringify({ skipRecipientBuild: false }),
+        });
+      } finally {
+        setNewRunPending(false);
+      }
+    } else {
+      await startCamp.mutateAsync({ skipRecipientBuild });
+    }
     void qc.invalidateQueries({ queryKey: ["campaigns", userKey] });
-    void qc.invalidateQueries({ queryKey: ["campaign", userKey, campaignId] });
+    if (!isNewCampaign) void qc.invalidateQueries({ queryKey: ["campaign", userKey, campaignId] });
     router.push("/email-marketing/campaigns");
     router.refresh();
+  }
+
+  async function savePausedFromRunningOnly() {
+    if (reviewAction) return;
+    setReviewAction("save");
+    try {
+      const dailyCampaignLimit = (() => {
+        if (flags.dailyCampaignLimit === "") return null;
+        const n = Number(flags.dailyCampaignLimit);
+        if (!Number.isFinite(n) || n <= 0) return null;
+        return n;
+      })();
+      await save.mutateAsync({ dailyCampaignLimit, wizardStep: 5 });
+      void qc.invalidateQueries({ queryKey: ["campaigns", userKey] });
+      if (!isNewCampaign) void qc.invalidateQueries({ queryKey: ["campaign", userKey, campaignId] });
+      router.push("/email-marketing/campaigns");
+      router.refresh();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Could not save changes.";
+      await showAlert(msg);
+    } finally {
+      setReviewAction(null);
+    }
+  }
+
+  async function onReviewSaveDraft() {
+    if (reviewAction) return;
+    setReviewAction("save");
+    try {
+      await saveCampaignFinalize();
+    } finally {
+      setReviewAction(null);
+    }
+  }
+
+  async function onReviewRunNow() {
+    if (reviewAction) return;
+    setReviewAction("run");
+    try {
+      await saveAndLaunchCampaign();
+    } finally {
+      setReviewAction(null);
+    }
+  }
+
+  async function onReviewSaveSchedule() {
+    if (reviewAction) return;
+    setReviewAction("schedule");
+    try {
+      await saveScheduleOnly();
+    } finally {
+      setReviewAction(null);
+    }
   }
 
   const storedCheckList: CheckRow[] = Array.isArray(camp?.checkListEntries)
@@ -567,22 +699,15 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
     [accounts],
   );
 
-  const ordinal = (n: number) => {
-    const labels = ["1st", "2nd", "3rd", "4th", "5th", "6th", "7th", "8th", "9th", "10th"];
-    return labels[n] ?? `${n + 1}th`;
-  };
-
-  const canUseReviewSaves = step === 6;
+  const canUseReviewSaves = step === 5;
   /** Step 5: a real datetime is set (not “start now”). Primary CTA label becomes “Save Schedule”. */
   const reviewUsesScheduledStart = !ignoreSchedule && Boolean(scheduleLocal.trim());
-  const reviewPrimaryActionLabel = reviewUsesScheduledStart ? "Save Schedule" : "Save & Run";
-  const reviewPrimaryActionPendingLabel = startCamp.isPending
-    ? reviewUsesScheduledStart
-      ? "Scheduling…"
-      : "Starting…"
-    : save.isPending
-      ? "Saving…"
-      : reviewPrimaryActionLabel;
+  const reviewSchedulePendingLabel =
+    reviewAction === "schedule" && (startCamp.isPending || save.isPending) ? "Scheduling…" : "Save Schedule";
+  const reviewRunPendingLabel =
+    reviewAction === "run" && (startCamp.isPending || save.isPending || newRunPending) ? "Starting…" : "Run Campaign";
+  const reviewSavePendingLabel = reviewAction === "save" && save.isPending ? "Saving…" : "Save Campaign";
+  const reviewPausedOnlySaveLabel = reviewAction === "save" && save.isPending ? "Saving…" : "Save changes";
 
   const doNotSendSummary = (() => {
     const parts: string[] = [];
@@ -608,7 +733,7 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
     ? "Start campaign now — scheduled date/time is ignored for the first send window"
     : scheduleLocal
       ? `Scheduled start (local): ${new Date(scheduleLocal).toLocaleString()}`
-      : "No schedule set (pick a date on step 5 or turn on “start now”)";
+      : "No schedule set (pick a date on the Schedule step or turn on “start now”)";
 
   const dailyLimitSummary = (() => {
     if (flags.dailyCampaignLimit === "") return "None — only each sender account’s daily limit applies.";
@@ -618,7 +743,7 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
   })();
 
   return (
-    <div className="mx-auto max-w-4xl space-y-8 pb-24">
+    <div className="mx-auto w-full max-w-[1400px] space-y-8 pb-24">
       <div className="flex flex-wrap items-center justify-end gap-2">
         {camp?.status === "RUNNING" ? (
           <button
@@ -667,6 +792,15 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
           >
             Pause
           </button>
+        </div>
+      ) : null}
+
+      {isPausedFromRunning ? (
+        <div className="rounded-xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-900 dark:border-sky-500/40 dark:bg-sky-500/10 dark:text-sky-100">
+          This campaign is paused after a running send. Only the{" "}
+          <span className="font-semibold">daily sending limit for this campaign</span> can be changed (Schedule step or Review). On
+          the last step, use <span className="font-semibold">Save changes</span>. Resuming continues from the same point in the
+          sequence — it does not restart the campaign.
         </div>
       ) : null}
 
@@ -725,16 +859,22 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
           <div>
             <label className={`block ${wizardFieldTitle}`}>Campaign name</label>
             <input
-              className="mt-1.5 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-800"
+              className={`mt-1.5 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-800 ${
+                isPausedFromRunning ? "cursor-not-allowed bg-slate-100 text-slate-600 dark:bg-slate-800/50 dark:text-slate-400" : ""
+              }`}
               value={name}
+              readOnly={isPausedFromRunning}
               onChange={(e) => setName(e.target.value)}
             />
           </div>
           <div>
             <label className={`block ${wizardFieldTitle}`}>List</label>
             <select
-              className="mt-1.5 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-800"
+              className={`mt-1.5 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-800 ${
+                isPausedFromRunning ? "cursor-not-allowed bg-slate-100 text-slate-600 opacity-80 dark:bg-slate-800/50" : ""
+              }`}
               value={listId}
+              disabled={isPausedFromRunning}
               onChange={(e) => setListId(e.target.value)}
             >
               <option value="">Select…</option>
@@ -786,13 +926,19 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
             <label className={`block ${wizardFieldTitle}`}>Select sender accounts for this campaign</label>
             <div
               role="button"
-              tabIndex={0}
-              className="mt-1.5 flex min-h-[2.75rem] w-full cursor-pointer flex-wrap items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-left text-sm outline-none transition hover:border-slate-300 hover:bg-slate-50/80 focus-visible:ring-2 focus-visible:ring-indigo-500/30 dark:border-slate-600 dark:bg-slate-800 dark:hover:border-slate-500 dark:hover:bg-slate-800/80"
+              tabIndex={isPausedFromRunning ? -1 : 0}
+              className={`mt-1.5 flex min-h-[2.75rem] w-full flex-wrap items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-left text-sm outline-none dark:border-slate-600 dark:bg-slate-800 ${
+                isPausedFromRunning
+                  ? "cursor-not-allowed opacity-60"
+                  : "cursor-pointer transition hover:border-slate-300 hover:bg-slate-50/80 focus-visible:ring-2 focus-visible:ring-indigo-500/30 dark:hover:border-slate-500 dark:hover:bg-slate-800/80"
+              }`}
               onClick={(e) => {
+                if (isPausedFromRunning) return;
                 if ((e.target as HTMLElement).closest("[data-sender-chip-remove]")) return;
                 setSenderPickerOpen(true);
               }}
               onKeyDown={(e) => {
+                if (isPausedFromRunning) return;
                 if (e.key === "Enter" || e.key === " ") {
                   e.preventDefault();
                   setSenderPickerOpen(true);
@@ -819,6 +965,7 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
                         className="rounded p-0.5 text-slate-500 opacity-0 transition hover:bg-slate-200 hover:text-slate-900 group-hover/chip:opacity-100 dark:hover:bg-slate-600 dark:hover:text-white"
                         onClick={(e) => {
                           e.stopPropagation();
+                          if (isPausedFromRunning) return;
                           setSenders((prev) => prev.filter((id) => id !== a.id));
                         }}
                       >
@@ -839,6 +986,7 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
                   on={flags.doNotSendUnverified}
                   onToggle={() => setFlags({ ...flags, doNotSendUnverified: !flags.doNotSendUnverified })}
                   aria-label="Do not send to unverified emails"
+                  disabled={isPausedFromRunning}
                 />
               </div>
               <div className="flex items-center justify-between gap-2 rounded-lg border border-slate-200 bg-slate-50/80 px-2.5 py-2 dark:border-slate-600 dark:bg-slate-800/40">
@@ -847,6 +995,7 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
                   on={flags.doNotSendRisky}
                   onToggle={() => setFlags({ ...flags, doNotSendRisky: !flags.doNotSendRisky })}
                   aria-label="Do not send to risky emails"
+                  disabled={isPausedFromRunning}
                 />
               </div>
               <div className="flex items-center justify-between gap-2 rounded-lg border border-slate-200 bg-slate-50/80 px-2.5 py-2 dark:border-slate-600 dark:bg-slate-800/40">
@@ -855,6 +1004,7 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
                   on={flags.doNotSendInvalid}
                   onToggle={() => setFlags({ ...flags, doNotSendInvalid: !flags.doNotSendInvalid })}
                   aria-label="Do not send to invalid emails"
+                  disabled={isPausedFromRunning}
                 />
               </div>
             </div>
@@ -868,6 +1018,7 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
                   type="radio"
                   name="multiEmail"
                   checked={flags.multiEmailPolicy === "ALL"}
+                  disabled={isPausedFromRunning}
                   onChange={() => setFlags({ ...flags, multiEmailPolicy: "ALL" })}
                 />
                 All emails
@@ -877,6 +1028,7 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
                   type="radio"
                   name="multiEmail"
                   checked={flags.multiEmailPolicy === "FIRST"}
+                  disabled={isPausedFromRunning}
                   onChange={() => setFlags({ ...flags, multiEmailPolicy: "FIRST" })}
                 />
                 First email
@@ -896,6 +1048,7 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
                 on={flags.skipIfInOtherCampaign}
                 onToggle={() => setFlags({ ...flags, skipIfInOtherCampaign: !flags.skipIfInOtherCampaign })}
                 aria-label="Skip if recipient is in another active campaign"
+                disabled={isPausedFromRunning}
               />
             </div>
           </div>
@@ -908,6 +1061,7 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
                   type="radio"
                   name="missVar"
                   checked={flags.missingVariablePolicy === "TO_CHECK_LIST"}
+                  disabled={isPausedFromRunning}
                   onChange={() => setFlags({ ...flags, missingVariablePolicy: "TO_CHECK_LIST" })}
                 />
                 Send to to-check list (do not send until resolved)
@@ -917,6 +1071,7 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
                   type="radio"
                   name="missVar"
                   checked={flags.missingVariablePolicy === "SEND_ANYWAY"}
+                  disabled={isPausedFromRunning}
                   onChange={() => setFlags({ ...flags, missingVariablePolicy: "SEND_ANYWAY" })}
                 />
                 Send campaign anyway
@@ -946,9 +1101,15 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
           <h2 className="text-lg font-semibold text-slate-800 dark:text-slate-100">Sequence</h2>
           <p className="text-xs text-slate-500">
             Tap <strong>Start</strong>, add your first email, then use <strong>+ Add next step</strong> to add Email, Delay, or
-            Condition branches. Delete appears when you hover a step.
+            Follow-Ups. Delete appears when you hover a step.
           </p>
-          <SequenceFlowEditor variant="root" value={mainFlow} onChange={setMainFlow} templates={templates} />
+          <SequenceFlowEditor
+            readOnly={isPausedFromRunning}
+            variant="root"
+            value={mainFlow}
+            onChange={setMainFlow}
+            templates={templates}
+          />
           <div className="flex flex-wrap items-center gap-4">
             <button type="button" className={wizardBackLinkClass} onClick={() => void persistBack()}>
               ← Back
@@ -967,255 +1128,13 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
       ) : null}
 
       {step === 4 ? (
-        <section className="space-y-6">
-          <h2 className="text-lg font-semibold text-slate-800 dark:text-slate-100">Follow-Ups</h2>
-          <p className="text-xs text-slate-500">
-            Optional automation for recipients who were sent a main-sequence email but have not opened it. Start the canvas,
-            set the situation (wait + which main email), then build the follow-up path with the same step types as the main
-            sequence.
-          </p>
-
-          <div className="rounded-xl border border-sky-400/70 bg-white p-4 shadow-sm dark:border-sky-500/45 dark:bg-slate-800/55">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <p className={`${wizardFieldTitle} max-w-xl`}>
-                Recipients who received the email but did not open it
-              </p>
-              <div className="flex items-center gap-2">
-                <span className="text-sm text-slate-600 dark:text-slate-400">Enable this follow-up</span>
-                <FormSwitch
-                  on={followUi.notOpened.enabled}
-                  onToggle={() => {
-                    const next = !followUi.notOpened.enabled;
-                    setFollowUi({
-                      ...followUi,
-                      notOpened: next
-                        ? {
-                            ...followUi.notOpened,
-                            enabled: true,
-                            situationFlowStarted: false,
-                            situationSaved: false,
-                            extensionFlow: [],
-                          }
-                        : { ...defaultFollowUi().notOpened, enabled: false },
-                    });
-                  }}
-                  aria-label="Enable follow-up for delivered but not opened"
-                />
-              </div>
-            </div>
-
-            {followUi.notOpened.enabled ? (
-              <div className="mt-4 flex w-full flex-col items-center space-y-3">
-                {situationModalOpen ? (
-                  <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4">
-                    <div
-                      role="dialog"
-                      aria-modal
-                      className="w-full max-w-sm rounded-xl border border-slate-200 bg-white p-4 shadow-xl dark:border-slate-600 dark:bg-slate-800"
-                    >
-                      <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">Situation</h3>
-                      <div className="mt-3 space-y-2.5 text-xs">
-                        <label className="block">
-                          <span className="text-slate-600 dark:text-slate-400">Situation</span>
-                          <select
-                            className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-sm dark:border-slate-600 dark:bg-slate-800"
-                            value="delivered_not_opened"
-                            disabled
-                          >
-                            <option value="delivered_not_opened">Delivered but not opened</option>
-                          </select>
-                        </label>
-                        <label className="block">
-                          <span className="text-slate-600 dark:text-slate-400">Wait (days after delivery)</span>
-                          <div className="mt-1">
-                            <NativeNumberInput
-                              className="w-20"
-                              min={0}
-                              value={followUi.notOpened.days}
-                              onChange={(days) =>
-                                setFollowUi({
-                                  ...followUi,
-                                  notOpened: { ...followUi.notOpened, days: days ?? 0 },
-                                })
-                              }
-                              aria-label="Days after delivery"
-                            />
-                          </div>
-                        </label>
-                        <label className="block">
-                          <span className="text-slate-600 dark:text-slate-400">After which main email</span>
-                          <select
-                            className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-sm dark:border-slate-600 dark:bg-slate-800"
-                            value={followUi.notOpened.anchorEmailIndex}
-                            onChange={(e) =>
-                              setFollowUi({
-                                ...followUi,
-                                notOpened: {
-                                  ...followUi.notOpened,
-                                  anchorEmailIndex: Number(e.target.value),
-                                },
-                              })
-                            }
-                          >
-                            {Array.from({ length: Math.max(1, mainEmailCount) }, (_, i) => (
-                              <option key={i} value={i}>
-                                {ordinal(i)} email
-                              </option>
-                            ))}
-                          </select>
-                        </label>
-                      </div>
-                      <div className="mt-4 flex justify-end gap-2">
-                        <button
-                          type="button"
-                          className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs dark:border-slate-600"
-                          onClick={() => setSituationModalOpen(false)}
-                        >
-                          Cancel
-                        </button>
-                        <button
-                          type="button"
-                          className="btn-save-primary-sm px-3 py-1.5 text-xs"
-                          onClick={() => {
-                            setFollowUi({
-                              ...followUi,
-                              notOpened: { ...followUi.notOpened, situationSaved: true },
-                            });
-                            setSituationModalOpen(false);
-                          }}
-                        >
-                          Save
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                ) : null}
-
-                {!followUi.notOpened.situationFlowStarted ? (
-                  <div className="flex w-full flex-col items-center justify-center py-6">
-                    <button
-                      type="button"
-                      className="rounded-full bg-emerald-400 px-10 py-2 text-sm font-semibold text-slate-900 shadow-sm transition hover:bg-emerald-500"
-                      onClick={() =>
-                        setFollowUi({
-                          ...followUi,
-                          notOpened: { ...followUi.notOpened, situationFlowStarted: true },
-                        })
-                      }
-                    >
-                      Start
-                    </button>
-                  </div>
-                ) : (
-                  <>
-                    <div className="pointer-events-none flex flex-col items-center">
-                      <div
-                        className={`rounded-full bg-emerald-400 px-6 py-1 text-[10px] font-semibold text-slate-900 ${
-                          followUi.notOpened.situationSaved ? "opacity-90" : "opacity-60"
-                        }`}
-                      >
-                        Start
-                      </div>
-                      <FlowArrowDown />
-                    </div>
-                    <div className="group/situation relative mx-auto w-full max-w-[220px]">
-                      <button
-                        type="button"
-                        className="relative w-full rounded-lg border border-slate-200 bg-white px-3 pb-2.5 pt-4 text-center shadow-sm transition hover:border-sky-400/50 hover:bg-slate-50/80 dark:border-slate-600 dark:bg-slate-800/88 dark:hover:border-sky-500/40 dark:hover:bg-slate-800/95"
-                        onClick={() => setSituationModalOpen(true)}
-                        aria-label="Situation: delivered but not opened — change wait and anchor email"
-                      >
-                        <div className="pointer-events-none absolute -top-2 left-1/2 -translate-x-1/2">
-                          <span className="inline-flex rounded-full bg-violet-200 px-2 py-0.5 text-[9px] font-semibold text-violet-950 dark:bg-violet-900/70 dark:text-violet-100">
-                            Situation
-                          </span>
-                        </div>
-                        <p className="text-sm font-medium text-slate-800 dark:text-slate-100">Delivered but not opened</p>
-                        <p className="mt-1 text-[10px] leading-snug text-slate-500 dark:text-slate-400">
-                          · wait {followUi.notOpened.days}d · after {ordinal(followUi.notOpened.anchorEmailIndex)} email
-                        </p>
-                      </button>
-                      <button
-                        type="button"
-                        title="Remove situation and follow-up steps"
-                        className="absolute right-0.5 top-0.5 z-20 rounded border border-slate-200 bg-white p-0.5 text-red-600 opacity-0 shadow-sm transition hover:bg-red-50 group-hover/situation:opacity-100 dark:border-slate-600 dark:bg-slate-800 dark:hover:bg-red-950/40"
-                        onClick={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          setSituationModalOpen(false);
-                          setFollowUi({
-                            ...followUi,
-                            notOpened: {
-                              ...followUi.notOpened,
-                              situationFlowStarted: false,
-                              situationSaved: false,
-                              extensionFlow: [],
-                            },
-                          });
-                        }}
-                        aria-label="Remove situation"
-                      >
-                        <Trash2 className="h-3 w-3" />
-                      </button>
-                    </div>
-                    {followUi.notOpened.situationSaved ? (
-                      <>
-                        <FlowArrowDown />
-                        <SequenceFlowEditor
-                          variant="followExtension"
-                          value={followUi.notOpened.extensionFlow ?? []}
-                          onChange={(next) =>
-                            setFollowUi({
-                              ...followUi,
-                              notOpened: { ...followUi.notOpened, extensionFlow: next },
-                            })
-                          }
-                          templates={templates}
-                        />
-                      </>
-                    ) : null}
-                  </>
-                )}
-              </div>
-            ) : null}
-          </div>
-
-          <div className="rounded-lg border border-slate-200 bg-slate-50/80 px-3 py-2.5 dark:border-slate-600 dark:bg-slate-800/55">
-            <div className="flex items-center justify-between gap-3">
-              <span className="text-sm font-semibold text-slate-900 dark:text-slate-100">Stop follow-ups who replied</span>
-              <FormSwitch
-                on={followUi.notOpened.enabled && flags.stopFollowUpsOnReply}
-                disabled={!followUi.notOpened.enabled}
-                onToggle={() => {
-                  if (!followUi.notOpened.enabled) return;
-                  setFlags({ ...flags, stopFollowUpsOnReply: !flags.stopFollowUpsOnReply });
-                }}
-                aria-label="Stop follow-ups when the recipient replies"
-              />
-            </div>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-4">
-            <button type="button" className={wizardBackLinkClass} onClick={() => void persistBack()}>
-              ← Back
-            </button>
-            <button
-              type="button"
-              className="btn-save-primary-sm inline-flex items-center gap-2"
-              disabled={save.isPending}
-              onClick={() => void goNext()}
-            >
-              {save.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-              {save.isPending ? "Saving…" : "Next"}
-            </button>
-          </div>
-        </section>
-      ) : null}
-
-      {step === 5 ? (
         <section className="space-y-4">
           <h2 className="text-lg font-semibold text-slate-800 dark:text-slate-100">Schedule</h2>
-          <div className="rounded-lg border border-slate-200 bg-white px-3 py-3 dark:border-slate-600 dark:bg-slate-800/55">
+          <div
+            className={`rounded-lg border border-slate-200 bg-white px-3 py-3 dark:border-slate-600 dark:bg-slate-800/55 ${
+              isPausedFromRunning ? "opacity-60" : ""
+            }`}
+          >
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div className="min-w-0 flex-1">
                 <p className={`${wizardFieldTitle} mb-1`}>Start campaign now and ignore schedule</p>
@@ -1227,14 +1146,19 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
                 on={ignoreSchedule}
                 onToggle={() => setIgnoreSchedule((v) => !v)}
                 aria-label="Start campaign now and ignore schedule"
+                disabled={isPausedFromRunning}
               />
             </div>
           </div>
-          <div className={ignoreSchedule ? "pointer-events-none opacity-50" : ""}>
+          <div
+            className={`${ignoreSchedule ? "pointer-events-none opacity-50" : ""} ${
+              isPausedFromRunning ? "pointer-events-none opacity-50" : ""
+            }`}
+          >
             <label className={`block ${wizardFieldTitle}`}>Schedule start (local date &amp; time)</label>
             <input
               type="datetime-local"
-              disabled={ignoreSchedule}
+              disabled={ignoreSchedule || isPausedFromRunning}
               className="mt-1.5 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-800"
               value={scheduleLocal}
               onChange={(e) => setScheduleLocal(e.target.value)}
@@ -1254,6 +1178,23 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
                   setFlags({ ...flags, stopCampaignOnCompanyReply: !flags.stopCampaignOnCompanyReply })
                 }
                 aria-label="Stop campaign when the company replies early"
+                disabled={isPausedFromRunning}
+              />
+            </div>
+          </div>
+          <div className="rounded-lg border border-slate-200 bg-white px-3 py-3 dark:border-slate-600 dark:bg-slate-800/55">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="min-w-0 flex-1">
+                <p className={wizardFieldTitle}>Stop follow-ups for prospects who replied</p>
+                <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                  When enabled, follow-up emails stop for prospects who reply after a follow-up has started.
+                </p>
+              </div>
+              <FormSwitch
+                on={flags.stopFollowUpsOnReply}
+                onToggle={() => setFlags({ ...flags, stopFollowUpsOnReply: !flags.stopFollowUpsOnReply })}
+                aria-label="Stop follow-ups for prospects who replied"
+                disabled={isPausedFromRunning}
               />
             </div>
           </div>
@@ -1289,12 +1230,21 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
         </section>
       ) : null}
 
-      {step === 6 ? (
+      {step === 5 ? (
         <section className="space-y-5">
           <h2 className="text-lg font-semibold text-slate-800 dark:text-slate-100">Review</h2>
           <p className="text-xs text-slate-500 dark:text-slate-400">
-            Full campaign summary before you save or run. If anything looks wrong, use <strong>Back</strong> to fix the earlier
-            steps.
+            {isPausedFromRunning ? (
+              <>
+                Review only — other fields are locked. Adjust the <strong>daily campaign limit</strong> in Schedule or below, then
+                use <strong>Save changes</strong>.
+              </>
+            ) : (
+              <>
+                Full campaign summary before you save or run. If anything looks wrong, use <strong>Back</strong> to fix the earlier
+                steps.
+              </>
+            )}
           </p>
           <div className="space-y-4 rounded-xl border border-slate-200 bg-white p-4 text-sm dark:border-slate-600 dark:bg-slate-800/55">
             <section>
@@ -1346,65 +1296,11 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
             <hr className="border-slate-200 dark:border-slate-600" />
 
             <section>
-              <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Main sequence</h3>
-              <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
-                Same structure as step 3 (emails, delays, opened-email branches).
-              </p>
-              <div className="mt-2 rounded-lg border border-slate-100 bg-slate-50/80 px-3 py-2.5 dark:border-slate-600/80 dark:bg-slate-900/40">
-                <FlowReviewTree steps={mainFlow} templates={templates} />
+              <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Sequence</h3>
+              <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">Same layout as the Sequence step (read-only preview).</p>
+              <div className="mt-2 max-h-[min(28rem,70vh)] overflow-y-auto overflow-x-hidden rounded-lg border border-slate-100 bg-slate-50/80 px-1 py-2 dark:border-slate-600/80 dark:bg-slate-900/40">
+                <SequenceFlowEditor readOnly variant="root" value={mainFlow} onChange={() => {}} templates={templates} />
               </div>
-              {mainCompiled.length ? (
-                <p className="mt-2 text-[11px] text-slate-500 dark:text-slate-400">
-                  <span className="font-semibold text-slate-600 dark:text-slate-300">Compiled send order: </span>
-                  {mainCompiled.map((m, i) => (
-                    <span key={i}>
-                      {i > 0 ? " → " : ""}
-                      {templates.find((t) => t.id === m.templateId)?.name ?? m.templateId}
-                      {m.delayDaysBeforeNext > 0 ? ` (+${m.delayDaysBeforeNext}d)` : ""}
-                    </span>
-                  ))}
-                </p>
-              ) : null}
-            </section>
-
-            <hr className="border-slate-200 dark:border-slate-600" />
-
-            <section>
-              <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Follow-ups</h3>
-              {!followUi.notOpened.enabled ? (
-                <p className="mt-2 text-xs text-slate-700 dark:text-slate-200">
-                  Delivered but not opened — <strong>off</strong> (no follow-up sequence).
-                </p>
-              ) : (
-                <div className="mt-2 space-y-3 text-xs text-slate-800 dark:text-slate-100">
-                  <p>
-                    <strong>Delivered but not opened</strong> — on.
-                  </p>
-                  <ul className="list-inside list-disc space-y-1 text-slate-700 dark:text-slate-200">
-                    <li>
-                      Wait <strong>{followUi.notOpened.days}</strong> day(s) after delivery.
-                    </li>
-                    <li>
-                      Anchor: after the <strong>{ordinal(followUi.notOpened.anchorEmailIndex)}</strong> main email.
-                    </li>
-                    {!followUi.notOpened.situationSaved ? (
-                      <li className="text-amber-800 dark:text-amber-200">
-                        Situation not saved — go back to step 4 and save the situation card before saving the campaign.
-                      </li>
-                    ) : null}
-                  </ul>
-                  <div>
-                    <p className="font-semibold text-slate-600 dark:text-slate-300">Follow-up path (after situation)</p>
-                    <div className="mt-1.5 rounded-lg border border-slate-100 bg-slate-50/80 px-3 py-2.5 dark:border-slate-600/80 dark:bg-slate-900/40">
-                      <FlowReviewTree steps={followUi.notOpened.extensionFlow ?? []} templates={templates} />
-                    </div>
-                  </div>
-                  <p>
-                    <span className="font-semibold text-slate-600 dark:text-slate-300">Stop follow-ups when recipient replies: </span>
-                    {followUi.notOpened.enabled && flags.stopFollowUpsOnReply ? "Yes" : "No"}
-                  </p>
-                </div>
-              )}
             </section>
 
             <hr className="border-slate-200 dark:border-slate-600" />
@@ -1421,13 +1317,36 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
                   {flags.stopCampaignOnCompanyReply ? "Yes" : "No"}
                 </li>
                 <li>
+                  <span className="font-semibold text-slate-600 dark:text-slate-300">Stop follow-ups for prospects who replied: </span>
+                  {flags.stopFollowUpsOnReply ? "Yes" : "No"}
+                </li>
+                <li>
                   <span className="font-semibold text-slate-600 dark:text-slate-300">Daily campaign limit: </span>
-                  {dailyLimitSummary}
+                  {isPausedFromRunning ? (
+                    <span className="mt-2 block">
+                      <input
+                        type="number"
+                        min={1}
+                        placeholder="e.g. 100"
+                        className="mt-1 w-40 rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-800"
+                        value={flags.dailyCampaignLimit === "" ? "" : flags.dailyCampaignLimit}
+                        onChange={(e) =>
+                          setFlags({ ...flags, dailyCampaignLimit: e.target.value === "" ? "" : Number(e.target.value) })
+                        }
+                      />
+                      <span className="mt-1 block text-[11px] font-normal text-slate-500 dark:text-slate-400">
+                        {dailyLimitSummary}
+                      </span>
+                    </span>
+                  ) : (
+                    dailyLimitSummary
+                  )}
                 </li>
               </ul>
             </section>
           </div>
 
+          {isPausedFromRunning ? null : (
           <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-600 dark:bg-slate-800/40">
             <h3 className="text-sm font-semibold">Validate recipients (optional)</h3>
             <button
@@ -1454,42 +1373,74 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
               </ul>
             ) : null}
           </div>
+          )}
 
           <div className="flex flex-wrap items-center gap-4">
             <button type="button" className={wizardBackLinkClass} onClick={() => void persistBack()}>
               ← Back
             </button>
-            <button
-              type="button"
-              className="btn-save-primary-sm inline-flex items-center gap-2"
-              disabled={!canUseReviewSaves || save.isPending}
-              onClick={() => void saveCampaignFinalize()}
-            >
-              {save.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-              {save.isPending ? "Saving…" : "Save campaign"}
-            </button>
-            <button
-              type="button"
-              className="inline-flex items-center gap-2 rounded-lg border border-emerald-600 bg-emerald-600 px-3 py-1 text-sm font-medium text-white shadow-sm disabled:opacity-40 dark:border-emerald-500 dark:bg-emerald-600"
-              disabled={
-                !canUseReviewSaves ||
-                save.isPending ||
-                startCamp.isPending ||
-                camp?.status === "RUNNING" ||
-                camp?.status === "COMPLETED"
-              }
-              title={
-                reviewUsesScheduledStart
-                  ? "Save all steps and activate this campaign on the scheduled start (builds recipients from the list)"
-                  : "Save all steps and run the campaign now (builds recipients from the list)"
-              }
-              onClick={() => void saveAndLaunchCampaign()}
-            >
-              {startCamp.isPending || save.isPending ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : null}
-              {reviewPrimaryActionPendingLabel}
-            </button>
+            {isPausedFromRunning ? (
+              <button
+                type="button"
+                className="btn-save-primary-sm inline-flex items-center gap-2"
+                disabled={!canUseReviewSaves || !!reviewAction || save.isPending}
+                onClick={() => void savePausedFromRunningOnly()}
+              >
+                {reviewAction === "save" && save.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                {reviewPausedOnlySaveLabel}
+              </button>
+            ) : reviewUsesScheduledStart ? (
+              <button
+                type="button"
+                className="inline-flex items-center gap-2 rounded-lg border border-indigo-600 bg-indigo-600 px-3 py-1 text-sm font-medium text-white shadow-sm disabled:opacity-40 dark:border-indigo-500 dark:bg-indigo-600"
+                disabled={
+                  !canUseReviewSaves ||
+                  !!reviewAction ||
+                  save.isPending ||
+                  startCamp.isPending ||
+                  camp?.status === "COMPLETED"
+                }
+                title="Save schedule — campaign will start at the scheduled date/time"
+                onClick={() => void onReviewSaveSchedule()}
+              >
+                {reviewAction === "schedule" && (startCamp.isPending || save.isPending) ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : null}
+                {reviewSchedulePendingLabel}
+              </button>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  className="btn-save-primary-sm inline-flex items-center gap-2"
+                  disabled={!canUseReviewSaves || !!reviewAction || save.isPending}
+                  onClick={() => void onReviewSaveDraft()}
+                >
+                  {reviewAction === "save" && save.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                  {reviewSavePendingLabel}
+                </button>
+                <button
+                  type="button"
+                  className="inline-flex items-center gap-2 rounded-lg border border-emerald-600 bg-emerald-600 px-3 py-1 text-sm font-medium text-white shadow-sm disabled:opacity-40 dark:border-emerald-500 dark:bg-emerald-600"
+                  disabled={
+                    !canUseReviewSaves ||
+                    !!reviewAction ||
+                    save.isPending ||
+                    startCamp.isPending ||
+                    newRunPending ||
+                    camp?.status === "RUNNING" ||
+                    camp?.status === "COMPLETED"
+                  }
+                  title="Run campaign now (builds recipients from the list)"
+                  onClick={() => void onReviewRunNow()}
+                >
+                  {reviewAction === "run" && (startCamp.isPending || save.isPending || newRunPending) ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : null}
+                  {reviewRunPendingLabel}
+                </button>
+              </>
+            )}
           </div>
         </section>
       ) : null}

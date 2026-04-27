@@ -271,11 +271,6 @@ export class EmailAccountsController {
     return this.accounts.list(user.userId);
   }
 
-  @Get('trash')
-  async trash(@CurrentUser() user: JwtUser) {
-    return this.accounts.listTrash(user.userId);
-  }
-
   @Get('availability')
   async availability(
     @CurrentUser() user: JwtUser,
@@ -350,12 +345,7 @@ export class EmailAccountsController {
 
   @Delete(':id')
   async remove(@CurrentUser() user: JwtUser, @Param('id') id: string) {
-    return this.accounts.softDelete(user.userId, id);
-  }
-
-  @Post(':id/restore')
-  async restore(@CurrentUser() user: JwtUser, @Param('id') id: string) {
-    return this.accounts.restore(user.userId, id);
+    return this.accounts.delete(user.userId, id);
   }
 
   @Post(':id/verify')

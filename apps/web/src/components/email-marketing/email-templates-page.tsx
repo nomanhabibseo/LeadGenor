@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowUpDown, Pencil, Plus, Search, Trash2 } from "lucide-react";
+import { Pencil, Plus, Search, Trash2 } from "lucide-react";
 import { useAppDialog } from "@/contexts/app-dialog-context";
 import { apiFetch } from "@/lib/api";
 import { invalidateTemplateRelatedQueries } from "@/lib/invalidate-template-queries";
@@ -33,10 +33,7 @@ export function EmailTemplatesPage() {
   const [open, setOpen] = useState(false);
   const [editFolder, setEditFolder] = useState<Folder | null>(null);
   const [editName, setEditName] = useState("");
-  const [pendingDelete, setPendingDelete] = useState<{ id: string; name: string } | null>(null);
-  const deleteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [listPage, setListPage] = useState(1);
-  const [folderSort, setFolderSort] = useState<"name_asc" | "name_desc">("name_asc");
 
   const { data: folders = [], isError, error, refetch } = useQuery({
     queryKey: ["template-folders", userKey, q],
@@ -45,23 +42,17 @@ export function EmailTemplatesPage() {
     enabled: status === "authenticated" && !!token && !!userKey,
   });
 
-  const visibleFolders = useMemo(
-    () => (pendingDelete ? folders.filter((f) => f.id !== pendingDelete.id) : folders),
-    [folders, pendingDelete],
-  );
+  const visibleFolders = useMemo(() => folders, [folders]);
 
   const sortedFolders = useMemo(() => {
     const list = [...visibleFolders];
-    list.sort((a, b) => {
-      const c = a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
-      return folderSort === "name_asc" ? c : -c;
-    });
+    list.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
     return list;
-  }, [visibleFolders, folderSort]);
+  }, [visibleFolders]);
 
   useEffect(() => {
     setListPage(1);
-  }, [q, folderSort]);
+  }, [q]);
 
   const listTotal = sortedFolders.length;
   const totalListPages = Math.max(1, Math.ceil(listTotal / TEMPLATES_PAGE_SIZE));
@@ -71,12 +62,6 @@ export function EmailTemplatesPage() {
   }, [sortedFolders, listPage]);
   const rangeFrom = listTotal === 0 ? 0 : (listPage - 1) * TEMPLATES_PAGE_SIZE + 1;
   const rangeTo = Math.min(listPage * TEMPLATES_PAGE_SIZE, listTotal);
-
-  useEffect(() => {
-    return () => {
-      if (deleteTimerRef.current) clearTimeout(deleteTimerRef.current);
-    };
-  }, []);
 
   function onNewFolderNext() {
     const n = newName.trim();
@@ -105,21 +90,9 @@ export function EmailTemplatesPage() {
     onSuccess: () => void invalidateTemplateRelatedQueries(qc, userKey),
   });
 
-  async function scheduleFolderDelete(f: Folder) {
-    if (!(await showConfirm(`Move folder “${f.name}” to trash? You can restore it from Templates trash.`))) return;
-    if (deleteTimerRef.current) clearTimeout(deleteTimerRef.current);
-    setPendingDelete({ id: f.id, name: f.name });
-    deleteTimerRef.current = setTimeout(() => {
-      void removeFolder.mutateAsync(f.id);
-      setPendingDelete(null);
-      deleteTimerRef.current = null;
-    }, 5000);
-  }
-
-  function undoFolderDelete() {
-    if (deleteTimerRef.current) clearTimeout(deleteTimerRef.current);
-    deleteTimerRef.current = null;
-    setPendingDelete(null);
+  async function deleteFolderNow(f: Folder) {
+    if (!(await showConfirm(`Move folder “${f.name}” to trash?`))) return;
+    await removeFolder.mutateAsync(f.id);
   }
 
   if (status === "loading") {
@@ -151,17 +124,6 @@ export function EmailTemplatesPage() {
 
       <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-white">Templates</h1>
 
-      {pendingDelete ? (
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950 dark:border-amber-500/40 dark:bg-amber-500/15 dark:text-amber-100">
-          <span>
-            Deleting folder <strong>{pendingDelete.name}</strong>… Undo within 5 seconds.
-          </span>
-          <button type="button" className="font-medium text-indigo-700 underline dark:text-indigo-400" onClick={undoFolderDelete}>
-            Undo
-          </button>
-        </div>
-      ) : null}
-
       <div className="space-y-3">
         <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
           <div className="relative min-w-0 flex-1 sm:max-w-md">
@@ -173,19 +135,7 @@ export function EmailTemplatesPage() {
               onChange={(e) => setQ(e.target.value)}
             />
           </div>
-          <div className="flex flex-wrap items-center gap-2 sm:shrink-0">
-            <div className="relative min-w-0 sm:min-w-[9.5rem]">
-              <ArrowUpDown className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
-              <select
-                className="em-btn-outline h-9 w-full cursor-pointer appearance-none rounded-xl border-slate-200 py-0 pl-8 pr-3 text-sm dark:border-slate-600"
-                value={folderSort}
-                onChange={(e) => setFolderSort(e.target.value as "name_asc" | "name_desc")}
-                aria-label="Sort folders"
-              >
-                <option value="name_asc">Sort: A–Z</option>
-                <option value="name_desc">Sort: Z–A</option>
-              </select>
-            </div>
+          <div className="flex flex-wrap items-center gap-2 sm:shrink-0 sm:ms-auto">
             <Link
               href="/email-marketing/templates/new"
               className="em-btn-primary inline-flex h-9 items-center justify-center gap-2 whitespace-nowrap px-4"
@@ -243,7 +193,7 @@ export function EmailTemplatesPage() {
                     type="button"
                     className="em-icon-btn em-icon-btn-danger h-8 w-8"
                     title="Delete folder"
-                    onClick={() => void scheduleFolderDelete(f)}
+                    onClick={() => void deleteFolderNow(f)}
                   >
                     <Trash2 className="h-3.5 w-3.5" />
                   </button>

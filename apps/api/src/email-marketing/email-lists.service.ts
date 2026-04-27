@@ -25,7 +25,7 @@ export class EmailListsService {
   async list(userId: string) {
     return this.prisma.emailList.findMany({
       where: { userId, deletedAt: null },
-      orderBy: { updatedAt: 'desc' },
+      orderBy: [{ campaigns: { _count: 'desc' } }, { updatedAt: 'desc' }],
       include: {
         _count: { select: { items: true, campaigns: true } },
         campaigns: {
@@ -41,7 +41,7 @@ export class EmailListsService {
   async listDeleted(userId: string) {
     return this.prisma.emailList.findMany({
       where: { userId, deletedAt: { not: null } },
-      orderBy: { updatedAt: 'desc' },
+      orderBy: [{ campaigns: { _count: 'desc' } }, { updatedAt: 'desc' }],
       include: {
         _count: { select: { items: true, campaigns: true } },
       },
@@ -169,6 +169,25 @@ export class EmailListsService {
       where: { listId, id: { in: itemIds } },
     });
     return { deleted: deleted.count };
+  }
+
+  async setItemEmails(userId: string, listId: string, itemId: string, emails: string[]) {
+    await this.get(userId, listId);
+    const row = await this.prisma.emailListItem.findFirst({ where: { id: itemId, listId } });
+    if (!row) throw new NotFoundException('List item not found.');
+    const cleaned = Array.from(
+      new Set(
+        (emails ?? [])
+          .map((e) => String(e).trim())
+          .filter(Boolean)
+          .map((e) => e.toLowerCase()),
+      ),
+    );
+    await this.prisma.emailListItem.update({
+      where: { id: itemId },
+      data: { emails: cleaned as unknown as Prisma.InputJsonValue },
+    });
+    return { ok: true, emails: cleaned };
   }
 
   async importCsv(userId: string, listId: string, csv: string) {

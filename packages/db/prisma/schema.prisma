@@ -63,8 +63,10 @@ model User {
   campaigns           Campaign[]
   emailSuppressions   EmailSuppression[]
   inboxMessages       InboxMessage[]
+  campaignSendLogs    CampaignSendLog[]
   oauthStates         OAuthState[]
   emailOAuthPendings  EmailOAuthPending[]
+  notifications       Notification[]
 }
 
 enum EmailListAutoUpdate {
@@ -251,6 +253,7 @@ model EmailAccount {
   deletedAt            DateTime?
 
   inboxMessages InboxMessage[]
+  campaignSendLogs CampaignSendLog[]
 
   @@unique([userId, tag])
   @@index([userId, deletedAt])
@@ -305,6 +308,7 @@ model Campaign {
   deletedAt                DateTime?
 
   recipients CampaignRecipient[]
+  sendLogs   CampaignSendLog[]
 
   @@index([userId, status])
   @@index([userId, deletedAt])
@@ -330,9 +334,27 @@ model CampaignRecipient {
   updatedAt       DateTime                  @updatedAt
 
   openEvents EmailOpenEvent[]
+  sendLogs   CampaignSendLog[]
 
   @@index([campaignId, emailListItemId])
   @@index([campaignId, nextSendAt, status])
+}
+
+model CampaignSendLog {
+  id            String      @id @default(cuid())
+  userId        String
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  campaignId    String
+  campaign      Campaign    @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  recipientId   String
+  recipient     CampaignRecipient @relation(fields: [recipientId], references: [id], onDelete: Cascade)
+  emailAccountId String
+  emailAccount  EmailAccount @relation(fields: [emailAccountId], references: [id], onDelete: Cascade)
+  targetEmail   String      @default("")
+  sentAt        DateTime    @default(now())
+
+  @@index([userId, campaignId, sentAt])
+  @@index([campaignId, emailAccountId])
 }
 
 model EmailOpenEvent {
@@ -387,6 +409,21 @@ model InboxMessage {
 
   @@index([userId, emailAccountId, folder, receivedAt])
   @@unique([emailAccountId, externalMessageId])
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  kind      String   @default("info") // info | warning | error
+  title     String
+  message   String   @default("")
+  href      String?  // optional deep link in app
+  readAt    DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([userId, readAt, createdAt])
+  @@index([userId, createdAt])
 }
 
 model OAuthState {

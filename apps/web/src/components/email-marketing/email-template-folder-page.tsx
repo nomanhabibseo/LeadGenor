@@ -18,10 +18,8 @@ export function EmailTemplateFolderPage({ folderId }: { folderId: string }) {
   const token = session?.accessToken;
   const userKey = sessionQueryUserKey(session);
   const qc = useQueryClient();
-  const { showAlert, showConfirm } = useAppDialog();
+  const { showConfirm } = useAppDialog();
   const [q, setQ] = useState("");
-  const [pendingTplDel, setPendingTplDel] = useState<{ id: string; name: string } | null>(null);
-  const deleteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const { data: folderMeta } = useQuery({
     queryKey: ["template-folder-meta", userKey, folderId],
@@ -39,16 +37,7 @@ export function EmailTemplateFolderPage({ folderId }: { folderId: string }) {
     enabled: status === "authenticated" && !!token && !!userKey,
   });
 
-  const visibleItems = useMemo(
-    () => (pendingTplDel ? items.filter((t) => t.id !== pendingTplDel.id) : items),
-    [items, pendingTplDel],
-  );
-
-  useEffect(() => {
-    return () => {
-      if (deleteTimerRef.current) clearTimeout(deleteTimerRef.current);
-    };
-  }, []);
+  const visibleItems = useMemo(() => items, [items]);
 
   const removeTpl = useMutation({
     mutationFn: (id: string) =>
@@ -58,21 +47,9 @@ export function EmailTemplateFolderPage({ folderId }: { folderId: string }) {
     },
   });
 
-  async function scheduleTemplateDelete(t: Tpl) {
-    if (!(await showConfirm(`Delete template “${t.name}”? You can undo for a few seconds after.`))) return;
-    if (deleteTimerRef.current) clearTimeout(deleteTimerRef.current);
-    setPendingTplDel({ id: t.id, name: t.name });
-    deleteTimerRef.current = setTimeout(() => {
-      void removeTpl.mutateAsync(t.id);
-      setPendingTplDel(null);
-      deleteTimerRef.current = null;
-    }, 5000);
-  }
-
-  function undoTemplateDelete() {
-    if (deleteTimerRef.current) clearTimeout(deleteTimerRef.current);
-    deleteTimerRef.current = null;
-    setPendingTplDel(null);
+  async function deleteTemplateNow(t: Tpl) {
+    if (!(await showConfirm(`Delete template “${t.name}”? This cannot be undone.`))) return;
+    await removeTpl.mutateAsync(t.id);
   }
 
   if (status === "loading") {
@@ -105,17 +82,6 @@ export function EmailTemplateFolderPage({ folderId }: { folderId: string }) {
         </Link>
       </div>
 
-      {pendingTplDel ? (
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950 dark:border-amber-500/40 dark:bg-amber-500/15 dark:text-amber-100">
-          <span>
-            Deleting template <strong>{pendingTplDel.name}</strong>… Undo within 5 seconds.
-          </span>
-          <button type="button" className="font-medium text-cyan-700 underline dark:text-cyan-300" onClick={undoTemplateDelete}>
-            Undo
-          </button>
-        </div>
-      ) : null}
-
       <div className="relative max-w-md">
         <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
         <input
@@ -147,7 +113,7 @@ export function EmailTemplateFolderPage({ folderId }: { folderId: string }) {
                 type="button"
                 className="rounded-lg p-2 text-slate-600 hover:bg-red-50 hover:text-red-600 dark:text-slate-400 dark:hover:bg-red-950/40 dark:hover:text-red-400"
                 title="Delete template"
-                onClick={() => void scheduleTemplateDelete(t)}
+                onClick={() => void deleteTemplateNow(t)}
               >
                 <Trash2 className="h-4 w-4" />
               </button>

@@ -282,6 +282,39 @@ export function ClientTable({
     void qc.invalidateQueries({ queryKey: ["stats"] });
   }
 
+  async function confirmSoftDeleteSelectedClients(ids: string[]) {
+    if (!ids.length) return;
+    if (!(await showConfirm(`Delete ${ids.length} selected row(s)?`))) return;
+    if (!token) return;
+
+    const snapshots = qc.getQueriesData<ClientListPayload>({ queryKey: ["clients"] });
+    qc.setQueriesData<ClientListPayload>({ queryKey: ["clients"] }, (old) => {
+      if (!old) return old;
+      const prevLen = old.data.length;
+      const next = old.data.filter((r) => !ids.includes(r.id));
+      const removed = prevLen - next.length;
+      if (!removed) return old;
+      return { ...old, data: next, total: Math.max(0, old.total - removed) };
+    });
+    setSelected(new Set());
+
+    const results = await Promise.allSettled(
+      ids.map((id) =>
+        fetch(apiUrl(`/clients/${id}`), {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+      ),
+    );
+    const failed = results.filter((r) => r.status !== "fulfilled" || !r.value.ok);
+    if (failed.length) {
+      snapshots.forEach(([key, data]) => qc.setQueryData(key, data));
+      void showAlert(`Could not delete ${failed.length} row(s). Please try again.`);
+    }
+    void qc.invalidateQueries({ queryKey: ["clients"] });
+    void qc.invalidateQueries({ queryKey: ["stats"] });
+  }
+
   async function restoreClientFromUndo() {
     if (!undoTrashBanner || !token) return;
     const res = await fetch(apiUrl(`/clients/${undoTrashBanner.id}/restore`), {
@@ -294,6 +327,21 @@ export function ClientTable({
     }
     if (undoBannerTimerRef.current) clearTimeout(undoBannerTimerRef.current);
     setUndoTrashBanner(null);
+    void qc.invalidateQueries({ queryKey: ["clients"] });
+    void qc.invalidateQueries({ queryKey: ["stats"] });
+  }
+
+  async function restoreSelectedClients(ids: string[]) {
+    if (!ids.length) return;
+    if (!token) return;
+    if (!(await showConfirm(`Restore ${ids.length} site(s)?`))) return;
+    for (const id of ids) {
+      await fetch(apiUrl(`/clients/${id}/restore`), {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+    }
+    setSelected(new Set());
     void qc.invalidateQueries({ queryKey: ["clients"] });
     void qc.invalidateQueries({ queryKey: ["stats"] });
   }
@@ -435,6 +483,15 @@ export function ClientTable({
         </h1>
         {scope === "active" ? (
           <div className="flex flex-wrap items-center justify-end gap-2">
+            {selected.size > 0 ? (
+              <button
+                type="button"
+                className="inline-flex h-8 items-center rounded-lg border border-red-200 bg-red-50 px-3 text-sm font-medium text-red-800 shadow-sm transition hover:bg-red-100 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200 dark:hover:bg-red-950/45"
+                onClick={() => void confirmSoftDeleteSelectedClients(Array.from(selected))}
+              >
+                Delete selected rows
+              </button>
+            ) : null}
             <button
               type="button"
               className="btn-toolbar-outline"
@@ -459,6 +516,35 @@ export function ClientTable({
               <Plus className="h-4 w-4" aria-hidden />
               Add client
             </Link>
+          </div>
+        ) : scope === "trash" ? (
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            {selected.size > 0 ? (
+              <>
+                <button
+                  type="button"
+                  className="btn-toolbar-outline"
+                  onClick={() => void restoreSelectedClients(Array.from(selected))}
+                >
+                  Restore selected
+                </button>
+                <button
+                  type="button"
+                  className="inline-flex h-8 items-center rounded-lg border border-red-200 bg-red-50 px-3 text-sm font-medium text-red-800 shadow-sm transition hover:bg-red-100 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200 dark:hover:bg-red-950/45"
+                  onClick={() => {
+                    const ids = [...selected];
+                    void (async () => {
+                      if (!ids.length) return;
+                      if (!(await showConfirm(`Permanently delete ${ids.length} site(s)? This cannot be undone.`)))
+                        return;
+                      await runPermanentDelete(ids);
+                    })();
+                  }}
+                >
+                  Delete selected
+                </button>
+              </>
+            ) : null}
           </div>
         ) : null}
       </div>
@@ -771,25 +857,7 @@ export function ClientTable({
         )}
       </div>
 
-      {scope === "trash" && selected.size > 0 && (
-        <div className="mt-3">
-          <button
-            type="button"
-            className="rounded-lg border border-red-200 bg-red-50 px-3 py-1.5 text-sm font-medium text-red-800 hover:bg-red-100"
-            onClick={() => {
-              const ids = [...selected];
-              void (async () => {
-                if (!ids.length) return;
-                if (!(await showConfirm(`Permanently delete ${ids.length} site(s)? This cannot be undone.`)))
-                  return;
-                await runPermanentDelete(ids);
-              })();
-            }}
-          >
-            Delete selected permanently
-          </button>
-        </div>
-      )}
+      {/* Bulk trash actions are shown in the top toolbar when rows are selected. */}
 
       {undoTrashBanner && scope === "active" ? (
         <div className="mt-4 flex items-center justify-between rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm text-emerald-950 dark:border-emerald-500/35 dark:bg-emerald-950/30 dark:text-emerald-100">

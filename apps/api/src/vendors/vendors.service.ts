@@ -423,44 +423,58 @@ export class VendorsService {
       if (q.backlinksMax != null) where.backlinks.lte = q.backlinksMax;
     }
 
-    const [total, rows] = await this.prisma.$transaction([
-      this.prisma.vendor.count({ where }),
-      this.prisma.vendor.findMany({
-        where,
-        include: {
-          currency: true,
-          language: true,
-          niches: { include: { niche: true } },
-          countries: { include: { country: true } },
-        },
-        skip: (q.page - 1) * q.limit,
-        take: q.limit,
-        orderBy: { updatedAt: 'desc' },
-      }),
-    ]);
+    const total = await this.prisma.vendor.count({ where });
 
-    const ids = rows.map((r) => r.id);
-    const counts =
-      ids.length === 0
+    // Order by "most completed orders" across pagination.
+    // We cap the scan to avoid heavy queries for extremely large datasets.
+    const MAX_SORT_SCAN = 2000;
+    const all = await this.prisma.vendor.findMany({
+      where,
+      select: { id: true, updatedAt: true },
+      orderBy: { updatedAt: 'desc' },
+      take: Math.min(total, MAX_SORT_SCAN),
+    });
+    const idsAll = all.map((r) => r.id);
+    const countsAll =
+      idsAll.length === 0
         ? []
         : await this.prisma.order.groupBy({
             by: ['vendorId'],
-            where: {
-              userId,
-              vendorId: { in: ids },
-              status: OrderStatus.COMPLETED,
-              deletedAt: null,
-            },
+            where: { userId, vendorId: { in: idsAll }, status: OrderStatus.COMPLETED, deletedAt: null },
             _count: { _all: true },
           });
-    const countMap = new Map(counts.map((c) => [c.vendorId, c._count._all]));
+    const countMap = new Map(countsAll.map((c) => [c.vendorId, c._count._all]));
 
-    rows.sort((a, b) => (countMap.get(b.id) ?? 0) - (countMap.get(a.id) ?? 0));
+    const sorted = [...all].sort((a, b) => {
+      const ca = countMap.get(a.id) ?? 0;
+      const cb = countMap.get(b.id) ?? 0;
+      if (ca !== cb) return cb - ca;
+      return b.updatedAt.getTime() - a.updatedAt.getTime();
+    });
 
-    const data = rows.map((r) => ({
-      ...r,
-      completedOrderCount: countMap.get(r.id) ?? 0,
-    }));
+    const pageIds = sorted
+      .slice((q.page - 1) * q.limit, (q.page - 1) * q.limit + q.limit)
+      .map((r) => r.id);
+    const rows =
+      pageIds.length === 0
+        ? []
+        : await this.prisma.vendor.findMany({
+            where: { id: { in: pageIds } },
+            include: {
+              currency: true,
+              language: true,
+              niches: { include: { niche: true } },
+              countries: { include: { country: true } },
+            },
+          });
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    const data = pageIds
+      .map((id) => byId.get(id))
+      .filter(Boolean)
+      .map((r) => ({
+        ...(r as (typeof rows)[number]),
+        completedOrderCount: countMap.get((r as (typeof rows)[number]).id) ?? 0,
+      }));
 
     return { data, total, page: q.page, limit: q.limit };
   }

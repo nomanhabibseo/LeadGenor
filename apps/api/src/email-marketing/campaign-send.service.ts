@@ -13,6 +13,7 @@ import { EmailCampaignsService } from './email-campaigns.service';
 import { EmailOAuthMailService } from './email-oauth-mail.service';
 import { htmlToPlainText } from './email-html-plain';
 import { applyMergeTemplate, buildMergeVars } from './merge-tags';
+import { NotificationsService } from '../notifications/notifications.service';
 import {
   INLINE_UNSUBSCRIBE_HREF,
   bodyHasInlineUnsubscribe,
@@ -39,12 +40,14 @@ function parseSenderAccountIds(raw: unknown): string[] {
 @Injectable()
 export class CampaignSendService {
   private readonly log = new Logger(CampaignSendService.name);
+  private tickRunning = false;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly accounts: EmailAccountsService,
     private readonly campaigns: EmailCampaignsService,
     private readonly oauthMail: EmailOAuthMailService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   /** Release rows left ACTIVE after a crash mid-send (claim uses ACTIVE as a lock). */
@@ -63,10 +66,47 @@ export class CampaignSendService {
     }
   }
 
-  /** Every 15s — `Interval` is more reliable across Windows / Node than 6-field cron. */
-  @Interval(15_000)
+  /** Polling loop for due sends. Kept at 1s to respect per-account second-level delays. */
+  @Interval(1_000)
   async tick() {
+    if (this.tickRunning) return;
+    this.tickRunning = true;
+    try {
     const now = new Date();
+    // Promote scheduled campaigns whose start time has arrived.
+    await this.prisma.campaign.updateMany({
+      where: {
+        deletedAt: null,
+        status: CampaignStatus.SCHEDULED,
+        scheduledAt: { lte: now },
+      },
+      data: { status: CampaignStatus.RUNNING, startedAt: now },
+    });
+
+      // Recovery: if a campaign was previously deferred far into the future (e.g. old UTC-midnight logic),
+      // and the first email was never sent, bring a few rows back to "due" so the campaign can start.
+      const deferred = await this.prisma.campaignRecipient.findMany({
+        where: {
+          status: CampaignRecipientStatus.QUEUED,
+          lastSentAt: null,
+          nextSendAt: { gt: now },
+          campaign: { is: { status: CampaignStatus.RUNNING, deletedAt: null } },
+        },
+        include: { campaign: true },
+        take: 25,
+        orderBy: [{ nextSendAt: 'asc' }],
+      });
+      for (const r of deferred) {
+        const senderIds = parseSenderAccountIds(r.campaign.senderAccountIds);
+        if (!senderIds.length) continue;
+        const acc = await this.pickEligibleSenderAccount(senderIds, r.campaign.userId);
+        if (!acc) continue;
+        await this.prisma.campaignRecipient.updateMany({
+          where: { id: r.id, status: CampaignRecipientStatus.QUEUED },
+          data: { nextSendAt: null },
+        });
+      }
+
     const due = await this.prisma.campaignRecipient.findMany({
       where: {
         /** Only QUEUED: ACTIVE is an in-flight lock; parallel ticks must not process the same row twice. */
@@ -88,6 +128,9 @@ export class CampaignSendService {
       } catch (e) {
         this.log.error(`Recipient ${rec.id}`, e);
       }
+    }
+    } finally {
+      this.tickRunning = false;
     }
   }
 
@@ -223,23 +266,29 @@ export class CampaignSendService {
       }
     }
 
-    const utcDayStart = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate()));
+    const dayStart = new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate());
     if (camp.dailyCampaignLimit != null && camp.dailyCampaignLimit > 0) {
       const n = await this.prisma.campaignRecipient.count({
         where: {
           campaignId: camp.id,
-          lastSentAt: { gte: utcDayStart },
+          lastSentAt: { gte: dayStart },
         },
       });
       if (n >= camp.dailyCampaignLimit) {
-        const nextDay = new Date(utcDayStart);
-        nextDay.setUTCDate(nextDay.getUTCDate() + 1);
+        const nextDay = new Date(dayStart);
+        nextDay.setDate(nextDay.getDate() + 1);
         this.log.warn(
           `Campaign ${camp.id}: daily cap ${camp.dailyCampaignLimit} reached for UTC day (${n} sends); deferring.`,
         );
         await this.revertRecipientToQueued(rec.id, nextDay);
         return;
       }
+    }
+
+    if (/localhost|127\.0\.0\.1/i.test(API_PUBLIC)) {
+      this.log.warn(
+        `API_PUBLIC_URL is "${API_PUBLIC}". Opens/unsubscribes will NOT track for real recipients. Set API_PUBLIC_URL to your public API domain.`,
+      );
     }
 
     const token = await this.campaigns.createUnsubscribeToken(camp.userId, rec.targetEmail.toLowerCase());
@@ -272,48 +321,94 @@ export class CampaignSendService {
     const jitterMs = (Math.floor(Math.random() * (hi - lo + 1)) + lo) * 1000;
 
     const listUnsub = unsubscribeUrl;
-    if (canSmtp && smtpPass) {
-      const transporter = this.accounts.buildTransport(
-        {
-          smtpHost: acc.smtpHost,
-          smtpPort: acc.smtpPort,
-          smtpUser: acc.smtpUser,
-          smtpEncryption: acc.smtpEncryption,
-          fromEmail: acc.fromEmail,
+    try {
+      if (canSmtp && smtpPass) {
+        const transporter = this.accounts.buildTransport(
+          {
+            smtpHost: acc.smtpHost,
+            smtpPort: acc.smtpPort,
+            smtpUser: acc.smtpUser,
+            smtpEncryption: acc.smtpEncryption,
+            fromEmail: acc.fromEmail,
+          },
+          smtpPass,
+        );
+        await transporter.sendMail({
+          from: `"${acc.displayName}" <${acc.fromEmail}>`,
+          to: rec.targetEmail,
+          bcc: acc.bcc || undefined,
+          subject,
+          text: plainBody,
+          html: bodyHtml,
+          headers: { 'List-Unsubscribe': `<${listUnsub}>` },
+        });
+      } else if (acc.provider === EmailAccountProvider.GMAIL_API) {
+        await this.oauthMail.sendGmail(acc, {
+          to: rec.targetEmail,
+          subject,
+          html: bodyHtml,
+          text: plainBody,
+          listUnsubscribe: listUnsub,
+          bcc: acc.bcc || undefined,
+        });
+      } else if (acc.provider === EmailAccountProvider.OUTLOOK) {
+        await this.oauthMail.sendMicrosoftGraph(acc, {
+          to: rec.targetEmail,
+          subject,
+          html: bodyHtml,
+          listUnsubscribe: listUnsub,
+          bcc: acc.bcc || undefined,
+        });
+      } else {
+        this.log.warn(`Campaign ${camp.id}: no send path for provider ${acc.provider} on account ${acc.id}.`);
+        await this.revertRecipientToQueued(rec.id, preserveNext);
+        return;
+      }
+    } catch (e) {
+      const msg =
+        e instanceof Error
+          ? e.message
+          : typeof e === 'string'
+            ? e
+            : 'Send failed';
+      await this.prisma.campaignRecipient.update({
+        where: { id: rec.id },
+        data: {
+          status: CampaignRecipientStatus.FAILED,
+          failReason: msg.slice(0, 240),
+          nextSendAt: null,
         },
-        smtpPass,
-      );
-      await transporter.sendMail({
-        from: `"${acc.displayName}" <${acc.fromEmail}>`,
-        to: rec.targetEmail,
-        bcc: acc.bcc || undefined,
-        subject,
-        text: plainBody,
-        html: bodyHtml,
-        headers: { 'List-Unsubscribe': `<${listUnsub}>` },
       });
-    } else if (acc.provider === EmailAccountProvider.GMAIL_API) {
-      await this.oauthMail.sendGmail(acc, {
-        to: rec.targetEmail,
-        subject,
-        html: bodyHtml,
-        text: plainBody,
-        listUnsubscribe: listUnsub,
-        bcc: acc.bcc || undefined,
-      });
-    } else if (acc.provider === EmailAccountProvider.OUTLOOK) {
-      await this.oauthMail.sendMicrosoftGraph(acc, {
-        to: rec.targetEmail,
-        subject,
-        html: bodyHtml,
-        listUnsubscribe: listUnsub,
-        bcc: acc.bcc || undefined,
-      });
-    } else {
-      this.log.warn(`Campaign ${camp.id}: no send path for provider ${acc.provider} on account ${acc.id}.`);
-      await this.revertRecipientToQueued(rec.id, preserveNext);
+      try {
+        await this.notifications.create(camp.userId, {
+          kind: 'error',
+          title: 'Email not delivered',
+          message: [
+            `Campaign: ${camp.name}`,
+            `To: ${rec.targetEmail}`,
+            `Site: ${item.siteUrl}`,
+            `Reason: ${msg.slice(0, 240)}`,
+          ].join('\n'),
+          href: `/email-marketing/campaigns/${encodeURIComponent(camp.id)}`,
+        });
+      } catch {
+        // Notifications are best-effort; sending flow must not crash on notify failures.
+      }
+      this.log.warn(`Campaign ${camp.id}: send failed for recipient ${rec.id} via account ${acc.id}: ${msg}`);
+      await this.markCampaignCompletedIfIdle(camp.id);
       return;
     }
+
+    // Log for reporting (campaign → account usage).
+    await this.prisma.campaignSendLog.create({
+      data: {
+        userId: camp.userId,
+        campaignId: camp.id,
+        recipientId: rec.id,
+        emailAccountId: acc.id,
+        targetEmail: rec.targetEmail,
+      },
+    });
 
     const cooldownUntil = new Date(Date.now() + jitterMs);
     await this.accounts.incrementSent(acc.id, cooldownUntil);
@@ -384,18 +479,19 @@ export class CampaignSendService {
   private async computeDeferUntil(senderIds: string[], userId: string): Promise<Date> {
     const now = Date.now();
     const d = new Date();
-    const nextUtcMidnight = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1, 0, 0, 0, 0)).getTime();
-    let earliest = nextUtcMidnight;
+    const nextLocalMidnight = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1, 0, 0, 0, 0).getTime();
+    let earliest = nextLocalMidnight;
     for (const sid of senderIds) {
       const a = await this.accounts.ensureDailyCounter(sid);
       if (!a || a.userId !== userId) continue;
       if (a.sentToday >= a.dailyLimit) {
-        earliest = Math.min(earliest, nextUtcMidnight);
+        earliest = Math.min(earliest, nextLocalMidnight);
       } else if (a.nextSendAllowedAt && a.nextSendAllowedAt.getTime() > now) {
         earliest = Math.min(earliest, a.nextSendAllowedAt.getTime());
       }
     }
-    return new Date(Math.max(earliest, now + 5000));
+    // Avoid artificially adding multiple seconds of extra delay; next tick is 1s.
+    return new Date(Math.max(earliest, now + 1000));
   }
 
   private async markCampaignCompletedIfIdle(campaignId: string) {

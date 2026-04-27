@@ -13,7 +13,7 @@ import {
 import { EmailListAutoUpdate } from '@prisma/client';
 import { Response } from 'express';
 import { Type } from 'class-transformer';
-import { IsArray, IsEnum, IsOptional, IsString, Max, Min } from 'class-validator';
+import { IsArray, ArrayMaxSize, IsEnum, IsOptional, IsString, Max, Min } from 'class-validator';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { CurrentUser, JwtUser } from '../common/decorators/current-user.decorator';
 import { EmailListsService } from './email-lists.service';
@@ -53,6 +53,13 @@ class RemoveItemsDto {
   @IsArray()
   @IsString({ each: true })
   itemIds!: string[];
+}
+
+class SetItemEmailsDto {
+  @IsArray()
+  @ArrayMaxSize(50)
+  @IsString({ each: true })
+  emails!: string[];
 }
 
 class ExportBodyDto {
@@ -127,6 +134,16 @@ export class EmailListsController {
   @Post(':id/items/remove')
   async removeItems(@CurrentUser() user: JwtUser, @Param('id') id: string, @Body() body: RemoveItemsDto) {
     return this.lists.removeItems(user.userId, id, body.itemIds);
+  }
+
+  @Patch(':id/items/:itemId/emails')
+  async setItemEmails(
+    @CurrentUser() user: JwtUser,
+    @Param('id') id: string,
+    @Param('itemId') itemId: string,
+    @Body() body: SetItemEmailsDto,
+  ) {
+    return this.lists.setItemEmails(user.userId, id, itemId, body.emails);
   }
 
   @Post(':id/import/csv')

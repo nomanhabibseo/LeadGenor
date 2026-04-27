@@ -59,8 +59,10 @@ export function EmailAccountEditPage({ accountId }: { accountId: string }) {
   const [imapPassword, setImapPassword] = useState("");
   const [imapEncryption, setImapEncryption] = useState<(typeof ENC)[number]>("TLS");
   const [dailyLimit, setDailyLimit] = useState(10);
-  const [delayMinSec, setDelayMinSec] = useState(200);
-  const [delayMaxSec, setDelayMaxSec] = useState(200);
+  const [delayMode, setDelayMode] = useState<"fixed" | "random">("fixed");
+  const [fixedDelaySec, setFixedDelaySec] = useState(60);
+  const [randomDelayFromSec, setRandomDelayFromSec] = useState(45);
+  const [randomDelayToSec, setRandomDelayToSec] = useState(120);
   const [signature, setSignature] = useState("");
   const [bcc, setBcc] = useState("");
 
@@ -86,11 +88,24 @@ export function EmailAccountEditPage({ accountId }: { accountId: string }) {
     setImapPassword("");
     setImapEncryption((acc.imapEncryption as (typeof ENC)[number]) ?? "TLS");
     setDailyLimit(acc.dailyLimit);
-    setDelayMinSec(acc.delayMinSec);
-    setDelayMaxSec(acc.delayMaxSec);
+    const mn = Number.isFinite(acc.delayMinSec) ? acc.delayMinSec : 0;
+    const mx = Number.isFinite(acc.delayMaxSec) ? acc.delayMaxSec : mn;
+    if (mn === mx) {
+      setDelayMode("fixed");
+      setFixedDelaySec(Math.max(0, mn));
+    } else {
+      setDelayMode("random");
+      setRandomDelayFromSec(Math.max(0, Math.min(mn, mx)));
+      setRandomDelayToSec(Math.max(0, Math.max(mn, mx)));
+    }
     setSignature(acc.signature ?? "");
     setBcc(acc.bcc ?? "");
   }, [acc]);
+
+  const delayMinSec =
+    delayMode === "fixed" ? Math.max(0, fixedDelaySec) : Math.max(0, Math.min(randomDelayFromSec, randomDelayToSec));
+  const delayMaxSec =
+    delayMode === "fixed" ? Math.max(0, fixedDelaySec) : Math.max(0, Math.max(randomDelayFromSec, randomDelayToSec));
 
   const save = useMutation({
     mutationFn: (smtpLike: boolean) => {
@@ -363,25 +378,66 @@ export function EmailAccountEditPage({ accountId }: { accountId: string }) {
               />
             </div>
           </label>
-          <div className="grid gap-3 sm:grid-cols-2">
-            <label className="block text-sm">
-              <span className="text-slate-500">Delay min (sec)</span>
-              <input
-                type="number"
-                className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 dark:border-slate-600 dark:bg-slate-800"
-                value={delayMinSec}
-                onChange={(e) => setDelayMinSec(Number(e.target.value))}
-              />
-            </label>
-            <label className="block text-sm">
-              <span className="text-slate-500">Delay max (sec)</span>
-              <input
-                type="number"
-                className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 dark:border-slate-600 dark:bg-slate-800"
-                value={delayMaxSec}
-                onChange={(e) => setDelayMaxSec(Number(e.target.value))}
-              />
-            </label>
+          <div className="rounded-xl border border-slate-200 p-4 dark:border-slate-600">
+            <p className="text-xs font-medium text-slate-600 dark:text-slate-400">Delay between emails</p>
+            <p className="mt-1 text-xs text-slate-500 dark:text-slate-500">
+              Choose one: a fixed pause after each send, or a random pause between a minimum and maximum.
+            </p>
+            <div className="mt-3 flex flex-wrap gap-6">
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="radio"
+                  name="delayMode"
+                  checked={delayMode === "fixed"}
+                  onChange={() => setDelayMode("fixed")}
+                />
+                Fixed delay between emails (seconds)
+              </label>
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="radio"
+                  name="delayMode"
+                  checked={delayMode === "random"}
+                  onChange={() => setDelayMode("random")}
+                />
+                Random delay between emails (seconds)
+              </label>
+            </div>
+            {delayMode === "fixed" ? (
+              <label className="mt-3 block text-sm">
+                <span className="text-slate-500 dark:text-slate-400">Seconds</span>
+                <input
+                  type="number"
+                  min={0}
+                  className="app-field-input mt-1 block max-w-[7.5rem] py-1.5 text-sm"
+                  value={fixedDelaySec}
+                  onChange={(e) => setFixedDelaySec(Number(e.target.value))}
+                />
+              </label>
+            ) : (
+              <div className="mt-3 flex flex-wrap items-end gap-3">
+                <label className="text-sm">
+                  <span className="text-slate-500 dark:text-slate-400">Delay min (sec)</span>
+                  <input
+                    type="number"
+                    min={0}
+                    className="app-field-input mt-1 block w-[5.5rem] py-1.5 text-sm"
+                    value={randomDelayFromSec}
+                    onChange={(e) => setRandomDelayFromSec(Number(e.target.value))}
+                  />
+                </label>
+                <label className="text-sm">
+                  <span className="text-slate-500 dark:text-slate-400">Delay max (sec)</span>
+                  <input
+                    type="number"
+                    min={0}
+                    className="app-field-input mt-1 block w-[5.5rem] py-1.5 text-sm"
+                    value={randomDelayToSec}
+                    onChange={(e) => setRandomDelayToSec(Number(e.target.value))}
+                  />
+                </label>
+              </div>
+            )}
           </div>
           <label className="block text-sm">
             <span className="text-slate-500">Signature</span>

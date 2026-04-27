@@ -22,6 +22,8 @@ const PROTECTED_PREFIXES = [
   "/trash",
   "/settings",
   "/email-marketing",
+  "/reports",
+  "/notifications",
 ];
 
 function needsAuth(pathname: string) {

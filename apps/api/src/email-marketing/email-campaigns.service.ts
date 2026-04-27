@@ -44,6 +44,214 @@ function parseSenderAccountIds(raw: unknown): string[] {
 export class EmailCampaignsService {
   constructor(private readonly prisma: PrismaService) {}
 
+  async completedReports(userId: string) {
+    const campaigns = await this.prisma.campaign.findMany({
+      where: { userId, deletedAt: null, status: CampaignStatus.COMPLETED },
+      orderBy: { completedAt: 'desc' },
+      select: {
+        id: true,
+        name: true,
+        completedAt: true,
+        createdAt: true,
+        emailList: { select: { id: true, name: true } },
+      },
+    });
+    const ids = campaigns.map((c) => c.id);
+    if (!ids.length) return [];
+
+    const [prospectCounts, sentCounts, byAccount] = await Promise.all([
+      this.prisma.campaignRecipient.groupBy({
+        by: ['campaignId'],
+        where: { campaignId: { in: ids } },
+        _count: { _all: true },
+      }),
+      this.prisma.campaignRecipient.groupBy({
+        by: ['campaignId'],
+        where: { campaignId: { in: ids }, lastSentAt: { not: null } },
+        _count: { _all: true },
+      }),
+      this.prisma.campaignSendLog.groupBy({
+        by: ['campaignId', 'emailAccountId'],
+        where: { userId, campaignId: { in: ids } },
+        _count: { _all: true },
+      }),
+    ]);
+
+    const prospectsByCampaign = new Map(prospectCounts.map((g) => [g.campaignId, g._count._all]));
+    const sentByCampaign = new Map(sentCounts.map((g) => [g.campaignId, g._count._all]));
+
+    const allAccountIds = Array.from(new Set(byAccount.map((g) => g.emailAccountId)));
+    const accounts =
+      allAccountIds.length > 0
+        ? await this.prisma.emailAccount.findMany({
+            where: { userId, id: { in: allAccountIds }, deletedAt: null },
+            select: { id: true, fromEmail: true, displayName: true },
+          })
+        : [];
+    const accById = new Map(accounts.map((a) => [a.id, a]));
+
+    const accountsByCampaign = new Map<
+      string,
+      { emailAccountId: string; fromEmail: string; displayName: string; sentEmails: number }[]
+    >();
+    for (const row of byAccount) {
+      const cid = row.campaignId;
+      const aid = row.emailAccountId;
+      const acc = accById.get(aid);
+      if (!acc) continue;
+      const list = accountsByCampaign.get(cid) ?? [];
+      list.push({
+        emailAccountId: aid,
+        fromEmail: acc.fromEmail,
+        displayName: acc.displayName,
+        sentEmails: row._count._all,
+      });
+      accountsByCampaign.set(cid, list);
+    }
+    for (const [cid, list] of accountsByCampaign) {
+      list.sort((a, b) => b.sentEmails - a.sentEmails);
+      accountsByCampaign.set(cid, list);
+    }
+
+    return campaigns.map((c) => ({
+      id: c.id,
+      name: c.name,
+      completedAt: c.completedAt ?? null,
+      emailList: c.emailList,
+      prospects: prospectsByCampaign.get(c.id) ?? 0,
+      totalSentEmails: sentByCampaign.get(c.id) ?? 0,
+      byAccount: accountsByCampaign.get(c.id) ?? [],
+    }));
+  }
+
+  async sendReports(userId: string, statuses: CampaignStatus[] = [CampaignStatus.RUNNING, CampaignStatus.COMPLETED]) {
+    const campaigns = await this.prisma.campaign.findMany({
+      where: { userId, deletedAt: null, status: { in: statuses } },
+      orderBy: [{ status: 'asc' }, { updatedAt: 'desc' }],
+      select: {
+        id: true,
+        name: true,
+        status: true,
+        startedAt: true,
+        completedAt: true,
+        createdAt: true,
+        emailList: { select: { id: true, name: true } },
+      },
+    });
+    const ids = campaigns.map((c) => c.id);
+    if (!ids.length) return [];
+
+    const [sentCounts, byAccount] = await Promise.all([
+      this.prisma.campaignSendLog.groupBy({
+        by: ['campaignId'],
+        where: { userId, campaignId: { in: ids } },
+        _count: { _all: true },
+      }),
+      this.prisma.campaignSendLog.groupBy({
+        by: ['campaignId', 'emailAccountId'],
+        where: { userId, campaignId: { in: ids } },
+        _count: { _all: true },
+      }),
+    ]);
+
+    const sentByCampaign = new Map(sentCounts.map((g) => [g.campaignId, g._count._all]));
+
+    const allAccountIds = Array.from(new Set(byAccount.map((g) => g.emailAccountId)));
+    const accounts =
+      allAccountIds.length > 0
+        ? await this.prisma.emailAccount.findMany({
+            where: { userId, id: { in: allAccountIds }, deletedAt: null },
+            select: { id: true, fromEmail: true, displayName: true },
+          })
+        : [];
+    const accById = new Map(accounts.map((a) => [a.id, a]));
+
+    const accountsByCampaign = new Map<
+      string,
+      { emailAccountId: string; fromEmail: string; displayName: string; sentEmails: number }[]
+    >();
+    for (const row of byAccount) {
+      const cid = row.campaignId;
+      const aid = row.emailAccountId;
+      const acc = accById.get(aid);
+      if (!acc) continue;
+      const list = accountsByCampaign.get(cid) ?? [];
+      list.push({
+        emailAccountId: aid,
+        fromEmail: acc.fromEmail,
+        displayName: acc.displayName,
+        sentEmails: row._count._all,
+      });
+      accountsByCampaign.set(cid, list);
+    }
+    for (const [cid, list] of accountsByCampaign) {
+      list.sort((a, b) => b.sentEmails - a.sentEmails);
+      accountsByCampaign.set(cid, list);
+    }
+
+    return campaigns.map((c) => ({
+      id: c.id,
+      name: c.name,
+      status: c.status,
+      startedAt: c.startedAt ?? null,
+      completedAt: c.completedAt ?? null,
+      emailList: c.emailList,
+      totalSentEmails: sentByCampaign.get(c.id) ?? 0,
+      byAccount: accountsByCampaign.get(c.id) ?? [],
+    }));
+  }
+
+  async sendReportAccountDrilldown(
+    userId: string,
+    campaignId: string,
+    emailAccountId: string,
+    take = 200,
+  ) {
+    const camp = await this.prisma.campaign.findFirst({
+      where: { id: campaignId, userId, deletedAt: null },
+      select: { id: true, name: true, status: true },
+    });
+    if (!camp) throw new NotFoundException('Campaign not found.');
+
+    const rows = await this.prisma.campaignSendLog.findMany({
+      where: { userId, campaignId, emailAccountId },
+      orderBy: { sentAt: 'desc' },
+      take: Math.min(Math.max(1, take), 500),
+      include: {
+        recipient: {
+          select: {
+            replied: true,
+            opened: true,
+            targetEmail: true,
+            emailListItem: {
+              select: {
+                companyName: true,
+                siteUrl: true,
+                country: true,
+                emails: true,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    return {
+      campaign: camp,
+      emailAccountId,
+      rows: rows.map((r) => ({
+        sentAt: r.sentAt,
+        replied: r.recipient?.replied ?? false,
+        opened: r.recipient?.opened ?? false,
+        targetEmail: r.recipient?.targetEmail || r.targetEmail || '',
+        companyName: r.recipient?.emailListItem?.companyName ?? '',
+        siteUrl: r.recipient?.emailListItem?.siteUrl ?? '',
+        country: r.recipient?.emailListItem?.country ?? '',
+        emails: (r.recipient?.emailListItem?.emails as unknown as string[]) ?? [],
+      })),
+    };
+  }
+
   private async assertCampaignNameUnique(userId: string, name: string, excludeId?: string) {
     const nm = name?.trim() || 'Untitled campaign';
     const dup = await this.prisma.campaign.findFirst({
@@ -65,6 +273,20 @@ export class EmailCampaignsService {
         emailList: { select: { id: true, name: true } },
         _count: { select: { recipients: true } },
       },
+    });
+    // Sort groups: running → paused → completed → draft (scheduled treated like running group but after running).
+    const prio: Record<CampaignStatus, number> = {
+      [CampaignStatus.RUNNING]: 0,
+      [CampaignStatus.SCHEDULED]: 1,
+      [CampaignStatus.PAUSED]: 2,
+      [CampaignStatus.COMPLETED]: 3,
+      [CampaignStatus.DRAFT]: 4,
+    };
+    rows.sort((a, b) => {
+      const pa = prio[a.status] ?? 99;
+      const pb = prio[b.status] ?? 99;
+      if (pa !== pb) return pa - pb;
+      return b.updatedAt.getTime() - a.updatedAt.getTime();
     });
     const campaignIds = rows.map((r) => r.id);
     if (!campaignIds.length) {
@@ -107,6 +329,8 @@ export class EmailCampaignsService {
         by: ['campaignId'],
         where: {
           campaignId: { in: campaignIds },
+          // "Pending" in UI means "not sent yet" (first touch not happened).
+          lastSentAt: null,
           status: {
             in: [
               CampaignRecipientStatus.PENDING,
@@ -119,12 +343,12 @@ export class EmailCampaignsService {
       }),
       this.prisma.campaignRecipient.groupBy({
         by: ['campaignId'],
-        where: { campaignId: { in: campaignIds }, opened: true },
+        where: { campaignId: { in: campaignIds }, opened: true, lastSentAt: { not: null } },
         _count: { _all: true },
       }),
       this.prisma.campaignRecipient.groupBy({
         by: ['campaignId'],
-        where: { campaignId: { in: campaignIds }, replied: true },
+        where: { campaignId: { in: campaignIds }, replied: true, lastSentAt: { not: null } },
         _count: { _all: true },
       }),
     ]);
@@ -149,32 +373,6 @@ export class EmailCampaignsService {
         replyRatePct: sent > 0 ? Math.round((replied / sent) * 100) : 0,
         senderAccountNames,
       };
-    });
-  }
-
-  async listTrash(userId: string) {
-    return this.prisma.campaign.findMany({
-      where: { userId, deletedAt: { not: null } },
-      orderBy: { updatedAt: 'desc' },
-      include: {
-        emailList: { select: { id: true, name: true } },
-        _count: { select: { recipients: true } },
-      },
-    });
-  }
-
-  async restore(userId: string, id: string) {
-    const c = await this.prisma.campaign.findFirst({
-      where: { id, userId, deletedAt: { not: null } },
-    });
-    if (!c) throw new NotFoundException('Deleted campaign not found.');
-    return this.prisma.campaign.update({
-      where: { id },
-      data: { deletedAt: null },
-      include: {
-        emailList: { select: { id: true, name: true } },
-        _count: { select: { recipients: true } },
-      },
     });
   }
 
@@ -227,6 +425,33 @@ export class EmailCampaignsService {
   ) {
     const c = await this.prisma.campaign.findFirst({ where: { id, userId, deletedAt: null } });
     if (!c) throw new NotFoundException('Campaign not found.');
+
+    /** Paused after it had already started: only allow daily cap + wizard step (for UI), nothing that would reset progress. */
+    const isPausedAfterRun = c.status === CampaignStatus.PAUSED && c.startedAt != null;
+    if (isPausedAfterRun) {
+      const rec = body as Record<string, unknown>;
+      const providedKeys = Object.keys(rec).filter((k) => rec[k] !== undefined);
+      const allowed = new Set(['dailyCampaignLimit', 'wizardStep']);
+      const disallowed = providedKeys.filter((k) => !allowed.has(k));
+      if (disallowed.length) {
+        throw new BadRequestException(
+          'For a paused campaign that was already running, only the daily campaign sending limit can be changed. Resume does not restart the campaign from the beginning.',
+        );
+      }
+      const data: Prisma.CampaignUpdateInput = {};
+      if (body.dailyCampaignLimit !== undefined) {
+        const v = body.dailyCampaignLimit as number | null | undefined;
+        data.dailyCampaignLimit = (v != null && Number(v) > 0 ? Number(v) : null) as never;
+      }
+      if (body.wizardStep !== undefined) {
+        data.wizardStep = body.wizardStep as number;
+      }
+      if (Object.keys(data).length === 0) {
+        return c;
+      }
+      return this.prisma.campaign.update({ where: { id }, data });
+    }
+
     if (body.name !== undefined && typeof body.name === 'string') {
       await this.assertCampaignNameUnique(userId, body.name, id);
     }
@@ -296,10 +521,8 @@ export class EmailCampaignsService {
     if (c.status === CampaignStatus.RUNNING) {
       throw new BadRequestException('Pause the campaign before deleting it.');
     }
-    await this.prisma.campaign.update({
-      where: { id },
-      data: { deletedAt: new Date() },
-    });
+    // Permanent delete (no trash for campaigns). Cascade deletes recipients via Prisma schema.
+    await this.prisma.campaign.delete({ where: { id } });
     return { ok: true };
   }
 
@@ -491,12 +714,15 @@ export class EmailCampaignsService {
     );
 
     /**
-     * Mark RUNNING *before* building recipients so the background sender (`tick`) does not skip
+     * If scheduling in the future: mark SCHEDULED (tick only sends RUNNING).
+     * If starting now: mark RUNNING *before* building recipients so the background sender (`tick`) does not skip
      * rows while status was still DRAFT/PAUSED (processRecipient only sends for RUNNING).
      */
     await this.prisma.campaign.update({
       where: { id: campaignId },
-      data: { status: CampaignStatus.RUNNING, startedAt: new Date() },
+      data: scheduleForFuture
+        ? { status: CampaignStatus.SCHEDULED, startedAt: null }
+        : { status: CampaignStatus.RUNNING, startedAt: new Date() },
     });
 
     try {
@@ -534,13 +760,12 @@ export class EmailCampaignsService {
     }
 
     const fresh = await this.prisma.campaign.findUnique({ where: { id: campaignId } });
-    const scheduledAt =
-      fresh?.scheduledAt && fresh.scheduledAt.getTime() > Date.now() ? fresh.scheduledAt : new Date();
+    // Keep scheduledAt if in the future; otherwise normalize to "now".
+    if (!fresh) return null;
+    const shouldNormalizeToNow = !fresh.scheduledAt || fresh.scheduledAt.getTime() <= Date.now();
     return this.prisma.campaign.update({
       where: { id: campaignId },
-      data: {
-        scheduledAt,
-      },
+      data: { scheduledAt: shouldNormalizeToNow ? new Date() : fresh.scheduledAt },
     });
   }
 

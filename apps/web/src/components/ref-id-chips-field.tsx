@@ -49,12 +49,13 @@ export function RefIdChipsField({
         )}
         onClick={(e) => {
           if ((e.target as HTMLElement).closest("[data-chip-remove]")) return;
+          if (ids.length >= max) return;
           onOpenPicker();
         }}
         onKeyDown={(e) => {
           if (e.key === "Enter" || e.key === " ") {
             e.preventDefault();
-            onOpenPicker();
+            if (ids.length < max) onOpenPicker();
           }
         }}
       >

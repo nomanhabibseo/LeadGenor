@@ -11,8 +11,8 @@ import { PrismaService } from '../prisma/prisma.service';
 import { decryptSecret, encryptSecret } from './crypto-secret';
 import { EmailImapSyncService } from './email-imap-sync.service';
 
-function startOfUtcDay(d: Date) {
-  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+function startOfLocalDay(d: Date) {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate());
 }
 
 @Injectable()
@@ -75,22 +75,10 @@ export class EmailAccountsService {
     return out;
   }
 
-  async listTrash(userId: string) {
-    const rows = await this.prisma.emailAccount.findMany({
-      where: { userId, deletedAt: { not: null } },
-      orderBy: { createdAt: 'desc' },
-    });
-    return rows.map((a) => ({
-      ...this.maskAccount(a),
-      connectionStatus: this.connectionListStatus(a),
-      canSyncMailbox: this.canSyncMailbox(a),
-    }));
-  }
-
   async list(userId: string) {
     const rows = await this.prisma.emailAccount.findMany({
       where: { userId, deletedAt: null },
-      orderBy: { createdAt: 'desc' },
+      orderBy: [{ sentTotal: 'desc' }, { updatedAt: 'desc' }],
     });
     const adjusted: EmailAccount[] = [];
     for (const row of rows) {
@@ -150,6 +138,10 @@ export class EmailAccountsService {
         throw new BadRequestException('IMAP host, port, user, and password are required when using IMAP.');
       }
     }
+    const dMinRaw = dto.delayMinSec ?? 200;
+    const dMaxRaw = dto.delayMaxSec ?? 200;
+    const dMin = Math.max(0, Math.min(dMinRaw, dMaxRaw));
+    const dMax = Math.max(0, Math.max(dMinRaw, dMaxRaw));
     const enc = encryptSecret(dto.smtpPassword);
     const imapEnc = hasImap ? encryptSecret(dto.imapPassword!.trim()) : null;
     let created: EmailAccount;
@@ -172,8 +164,8 @@ export class EmailAccountsService {
           imapPasswordEnc: imapEnc,
           imapEncryption: hasImap ? (dto.imapEncryption ?? SmtpEncryption.TLS) : SmtpEncryption.TLS,
           dailyLimit: dto.dailyLimit ?? 10,
-          delayMinSec: dto.delayMinSec ?? 200,
-          delayMaxSec: dto.delayMaxSec ?? 200,
+          delayMinSec: dMin,
+          delayMaxSec: dMax,
           signature: dto.signature ?? '',
           bcc: dto.bcc ?? '',
         },
@@ -310,8 +302,13 @@ export class EmailAccountsService {
     if (dto.fromEmail !== undefined) data.fromEmail = dto.fromEmail.trim().toLowerCase();
     if (dto.tag !== undefined) data.tag = dto.tag.trim();
     if (dto.dailyLimit !== undefined) data.dailyLimit = dto.dailyLimit;
-    if (dto.delayMinSec !== undefined) data.delayMinSec = dto.delayMinSec;
-    if (dto.delayMaxSec !== undefined) data.delayMaxSec = dto.delayMaxSec;
+    const hasDelayUpdate = dto.delayMinSec !== undefined || dto.delayMaxSec !== undefined;
+    if (hasDelayUpdate) {
+      const nextMinRaw = dto.delayMinSec ?? acc.delayMinSec ?? 0;
+      const nextMaxRaw = dto.delayMaxSec ?? acc.delayMaxSec ?? nextMinRaw;
+      data.delayMinSec = Math.max(0, Math.min(nextMinRaw, nextMaxRaw));
+      data.delayMaxSec = Math.max(0, Math.max(nextMinRaw, nextMaxRaw));
+    }
     if (dto.signature !== undefined) data.signature = dto.signature;
     if (dto.bcc !== undefined) data.bcc = dto.bcc;
     if (dto.campaignsEnabled !== undefined) data.campaignsEnabled = dto.campaignsEnabled;
@@ -367,19 +364,13 @@ export class EmailAccountsService {
     }
   }
 
-  async softDelete(userId: string, id: string) {
+  async delete(userId: string, id: string) {
     const acc = await this.prisma.emailAccount.findFirst({
       where: { id, userId, deletedAt: null },
     });
     if (!acc) throw new NotFoundException('Account not found.');
-    await this.prisma.emailAccount.update({ where: { id }, data: { deletedAt: new Date() } });
-    return { ok: true };
-  }
-
-  async restore(userId: string, id: string) {
-    const acc = await this.prisma.emailAccount.findFirst({ where: { id, userId } });
-    if (!acc) throw new NotFoundException('Account not found.');
-    await this.prisma.emailAccount.update({ where: { id }, data: { deletedAt: null } });
+    // Permanent delete (no trash for email accounts).
+    await this.prisma.emailAccount.delete({ where: { id } });
     return { ok: true };
   }
 
@@ -462,8 +453,8 @@ export class EmailAccountsService {
   async ensureDailyCounter(accountId: string) {
     const acc = await this.prisma.emailAccount.findUnique({ where: { id: accountId } });
     if (!acc) return acc;
-    const today = startOfUtcDay(new Date());
-    const last = acc.sentTodayDate ? startOfUtcDay(acc.sentTodayDate) : null;
+    const today = startOfLocalDay(new Date());
+    const last = acc.sentTodayDate ? startOfLocalDay(acc.sentTodayDate) : null;
     if (!last || last.getTime() !== today.getTime()) {
       return this.prisma.emailAccount.update({
         where: { id: accountId },

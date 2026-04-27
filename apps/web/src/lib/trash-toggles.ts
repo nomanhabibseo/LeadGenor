@@ -3,9 +3,7 @@ export type TrashModuleKey =
   | "clients"
   | "orders"
   | "lists"
-  | "templates"
-  | "emailAccounts"
-  | "campaigns";
+  | "templates";
 
 const KEYS: TrashModuleKey[] = [
   "vendors",
@@ -13,8 +11,6 @@ const KEYS: TrashModuleKey[] = [
   "orders",
   "lists",
   "templates",
-  "emailAccounts",
-  "campaigns",
 ];
 
 /** `null`/invalid toggles object → all modules enabled */

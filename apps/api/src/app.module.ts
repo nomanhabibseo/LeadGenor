@@ -16,11 +16,14 @@ import { UsersModule } from './users/users.module';
 import { VendorsModule } from './vendors/vendors.module';
 import { HealthModule } from './health/health.module';
 import { EmailMarketingModule } from './email-marketing/email-marketing.module';
+import { NotificationsModule } from './notifications/notifications.module';
+import { EmailFinderModule } from './email-finder/email-finder.module';
 
 @Module({
   imports: [
     HealthModule,
     EmailMarketingModule,
+    EmailFinderModule,
     ConfigModule.forRoot({
       isGlobal: true,
       // Monorepo: load repo root `.env` first (DATABASE_URL, PORT), then `apps/api/.env` if present.
@@ -42,6 +45,7 @@ import { EmailMarketingModule } from './email-marketing/email-marketing.module';
     StatsModule,
     InvoicingModule,
     ImportExportModule,
+    NotificationsModule,
   ],
 })
 export class AppModule {}

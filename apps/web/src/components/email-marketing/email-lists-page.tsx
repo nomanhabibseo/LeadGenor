@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowUpDown, Loader2, Pencil, Plus, Search, Trash2 } from "lucide-react";
+import { Loader2, Pencil, Plus, Search, Trash2 } from "lucide-react";
 import { useAppDialog } from "@/contexts/app-dialog-context";
 import { apiFetch } from "@/lib/api";
 import { sessionQueryUserKey } from "@/lib/session-query-scope";
@@ -50,7 +50,6 @@ export function EmailListsPage() {
   const [undoListRestore, setUndoListRestore] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [listPage, setListPage] = useState(1);
-  const [listSort, setListSort] = useState<"name_asc" | "name_desc" | "sites_desc">("name_asc");
 
   const { data: lists = [], isLoading, isError, error, refetch } = useQuery({
     queryKey: ["email-lists", userKey],
@@ -66,19 +65,13 @@ export function EmailListsPage() {
 
   const sortedLists = useMemo(() => {
     const list = [...filteredLists];
-    if (listSort === "name_asc") {
-      list.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
-    } else if (listSort === "name_desc") {
-      list.sort((a, b) => b.name.localeCompare(a.name, undefined, { sensitivity: "base" }));
-    } else {
-      list.sort((a, b) => b._count.items - a._count.items || a.name.localeCompare(b.name));
-    }
+    list.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
     return list;
-  }, [filteredLists, listSort]);
+  }, [filteredLists]);
 
   useEffect(() => {
     setListPage(1);
-  }, [search, listSort]);
+  }, [search]);
 
   const listTotal = sortedLists.length;
   const totalListPages = Math.max(1, Math.ceil(listTotal / LISTS_PAGE_SIZE));
@@ -191,19 +184,6 @@ export function EmailListsPage() {
             />
           </div>
           <div className="flex flex-wrap items-center gap-2 sm:shrink-0 sm:ms-auto">
-            <div className="relative min-w-0 sm:min-w-[10.5rem]">
-              <ArrowUpDown className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
-              <select
-                className="em-btn-outline h-9 w-full cursor-pointer appearance-none rounded-xl border-slate-200 py-0 pl-8 pr-3 text-sm dark:border-slate-600"
-                value={listSort}
-                onChange={(e) => setListSort(e.target.value as typeof listSort)}
-                aria-label="Sort lists"
-              >
-                <option value="name_asc">Sort: A–Z</option>
-                <option value="name_desc">Sort: Z–A</option>
-                <option value="sites_desc">Sort: Sites (high–low)</option>
-              </select>
-            </div>
             <button
               type="button"
               className="em-btn-primary inline-flex h-9 items-center gap-2 whitespace-nowrap px-4"

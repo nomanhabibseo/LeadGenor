@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSession } from "next-auth/react";
 import { useCallback, useMemo, useRef, useState } from "react";
-import { CalendarRange, ExternalLink, Plus } from "lucide-react";
+import { CalendarRange, ChevronDown, ExternalLink, Plus } from "lucide-react";
 import { useAppDialog } from "@/contexts/app-dialog-context";
 import { apiFetch, apiUrl } from "@/lib/api";
 import { ExportFormatMenu, type ExportChunk } from "@/components/export-format-menu";
@@ -136,6 +136,7 @@ export function OrderTable({
   const allIds = useMemo(() => rows.map((r) => r.id), [rows]);
 
   const dateFilterActive = Boolean(appliedFrom.trim() || appliedTo.trim());
+  const [scopeMenuOpen, setScopeMenuOpen] = useState(false);
 
   const applyDateFilter = useCallback(() => {
     setAppliedFrom(draftFrom);
@@ -282,6 +283,69 @@ export function OrderTable({
     void qc.invalidateQueries({ queryKey: ["stats"] });
   }
 
+  async function softDeleteSelectedOrders(ids: string[]) {
+    if (!ids.length) return;
+    if (!token) return;
+    if (!(await showConfirm(`Delete ${ids.length} selected row(s)?`))) return;
+
+    const snapshots = qc.getQueriesData<OrderListPayload>({ queryKey: ["orders"] });
+    qc.setQueriesData<OrderListPayload>({ queryKey: ["orders"] }, (old) => {
+      if (!old) return old;
+      const prevLen = old.data.length;
+      const next = old.data.filter((r) => !ids.includes(r.id));
+      const removed = prevLen - next.length;
+      if (!removed) return old;
+      return { ...old, data: next, total: Math.max(0, old.total - removed) };
+    });
+    setSelected(new Set());
+
+    const results = await Promise.allSettled(
+      ids.map((id) =>
+        fetch(apiUrl(`/orders/${id}`), {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+      ),
+    );
+    const failed = results.filter((r) => r.status !== "fulfilled" || !r.value.ok);
+    if (failed.length) {
+      snapshots.forEach(([key, data]) => qc.setQueryData(key, data));
+      void showAlert(`Could not delete ${failed.length} row(s). Please try again.`);
+    }
+    void qc.invalidateQueries({ queryKey: ["orders"] });
+    void qc.invalidateQueries({ queryKey: ["stats"] });
+  }
+
+  async function runPermanentDeleteSelected(ids: string[]) {
+    if (!ids.length) return;
+    if (!token) return;
+    if (!(await showConfirm(`Permanently delete ${ids.length} order(s)? This cannot be undone.`))) return;
+    for (const id of ids) {
+      await fetch(apiUrl(`/orders/${id}/permanent`), {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+    }
+    setSelected(new Set());
+    void qc.invalidateQueries({ queryKey: ["orders"] });
+    void qc.invalidateQueries({ queryKey: ["stats"] });
+  }
+
+  async function restoreSelectedOrders(ids: string[]) {
+    if (!ids.length) return;
+    if (!token) return;
+    if (!(await showConfirm(`Restore ${ids.length} order(s)?`))) return;
+    for (const id of ids) {
+      await fetch(apiUrl(`/orders/${id}/restore`), {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+    }
+    setSelected(new Set());
+    void qc.invalidateQueries({ queryKey: ["orders"] });
+    void qc.invalidateQueries({ queryKey: ["stats"] });
+  }
+
   async function restoreOrderFromUndo() {
     if (!undoTrashBanner || !token) return;
     const ok = await restoreOrder(undoTrashBanner.id);
@@ -337,6 +401,33 @@ export function OrderTable({
           {title}
         </h1>
         <div className="flex flex-wrap items-center justify-end gap-2">
+          {!isTrash && selected.size > 0 ? (
+            <button
+              type="button"
+              className="inline-flex h-8 items-center rounded-lg border border-red-200 bg-red-50 px-3 text-sm font-medium text-red-800 shadow-sm transition hover:bg-red-100 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200 dark:hover:bg-red-950/45"
+              onClick={() => void softDeleteSelectedOrders(Array.from(selected))}
+            >
+              Delete selected rows
+            </button>
+          ) : null}
+          {isTrash && selected.size > 0 ? (
+            <>
+              <button
+                type="button"
+                className="btn-toolbar-outline"
+                onClick={() => void restoreSelectedOrders(Array.from(selected))}
+              >
+                Restore selected
+              </button>
+              <button
+                type="button"
+                className="inline-flex h-8 items-center rounded-lg border border-red-200 bg-red-50 px-3 text-sm font-medium text-red-800 shadow-sm transition hover:bg-red-100 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200 dark:hover:bg-red-950/45"
+                onClick={() => void runPermanentDeleteSelected(Array.from(selected))}
+              >
+                Delete selected
+              </button>
+            </>
+          ) : null}
           <ExportFormatMenu
             total={total}
             selectionCount={selected.size}
@@ -382,29 +473,37 @@ export function OrderTable({
                   <span className="text-[11px] text-slate-400">Loading lists…</span>
                 ) : (
                   <>
-                    <Link
-                      href="/orders"
-                      className={cn("scope-pill", scope === "all" && "scope-pill-active")}
-                    >
-                      All (
-                      {dashStats.completedOrders + dashStats.pendingOrders}
-                      )
-                    </Link>
-                    <Link
-                      href="/orders/completed"
-                      className={cn(
-                        "scope-pill",
-                        scope === "completed" && "scope-pill-active",
-                      )}
-                    >
-                      Completed ({dashStats.completedOrders})
-                    </Link>
-                    <Link
-                      href="/orders/pending"
-                      className={cn("scope-pill", scope === "pending" && "scope-pill-active")}
-                    >
-                      Pending ({dashStats.pendingOrders})
-                    </Link>
+                    <div className="relative">
+                      <button
+                        type="button"
+                        className={cn("scope-pill", (scope === "all" || scope === "completed" || scope === "pending") && "scope-pill-active")}
+                        onClick={() => setScopeMenuOpen((o) => !o)}
+                      >
+                        All ({dashStats.completedOrders + dashStats.pendingOrders})
+                        <ChevronDown className="ml-1 h-3.5 w-3.5 opacity-80" />
+                      </button>
+                      {scopeMenuOpen ? (
+                        <>
+                          <button
+                            type="button"
+                            className="fixed inset-0 z-40 cursor-default"
+                            aria-label="Close menu"
+                            onClick={() => setScopeMenuOpen(false)}
+                          />
+                          <div className="absolute left-0 top-full z-50 mt-2 w-56 overflow-hidden rounded-xl border border-slate-200 bg-white p-1 shadow-xl dark:border-slate-700 dark:bg-slate-950">
+                            <Link className={cn("block rounded-lg px-3 py-2 text-sm hover:bg-slate-50 dark:hover:bg-slate-900/60", scope === "all" && "font-semibold text-violet-700 dark:text-violet-300")} href="/orders" onClick={() => setScopeMenuOpen(false)}>
+                              All ({dashStats.completedOrders + dashStats.pendingOrders})
+                            </Link>
+                            <Link className={cn("block rounded-lg px-3 py-2 text-sm hover:bg-slate-50 dark:hover:bg-slate-900/60", scope === "completed" && "font-semibold text-violet-700 dark:text-violet-300")} href="/orders/completed" onClick={() => setScopeMenuOpen(false)}>
+                              Completed ({dashStats.completedOrders})
+                            </Link>
+                            <Link className={cn("block rounded-lg px-3 py-2 text-sm hover:bg-slate-50 dark:hover:bg-slate-900/60", scope === "pending" && "font-semibold text-violet-700 dark:text-violet-300")} href="/orders/pending" onClick={() => setScopeMenuOpen(false)}>
+                              Pending ({dashStats.pendingOrders})
+                            </Link>
+                          </div>
+                        </>
+                      ) : null}
+                    </div>
                   </>
                 )}
                 <button

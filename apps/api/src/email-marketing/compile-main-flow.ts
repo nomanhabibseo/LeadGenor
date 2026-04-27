@@ -9,8 +9,10 @@ export type MainFlowStep =
   | {
       id: string;
       t: 'condition';
-      kind?: 'opened_email';
+      kind?: 'follow_ups' | 'opened_email';
+      afterEmailIndex?: number;
       waitDays?: number;
+      configComplete?: boolean;
       yes: MainFlowStep[];
       no: MainFlowStep[];
     };

@@ -6,10 +6,18 @@ export type MainFlowStep =
   | {
       id: string;
       t: "condition";
-      /** Default: opened-email engagement split (Yes = clicked link, no reply; No = no link click). */
-      kind?: "opened_email";
-      /** Days to wait after open before evaluating / continuing branch paths. */
+      /**
+       * Follow-Ups: after Nth main-sequence email (0 = 1st) + wait, branch by engagement.
+       * `yes` = opened but not replied; `no` = delivered and not opened.
+       */
+      kind?: "follow_ups" | "opened_email";
+      /** 0 = 1st email in spine before this node, 1 = 2nd, … */
+      afterEmailIndex?: number;
+      /** Wait this many days after the anchor email (0–14), then start branch sends. */
       waitDays?: number;
+      /** User finished wait + email anchor in the card (enables + next on branches). */
+      configComplete?: boolean;
+      /** Legacy: opened_email without anchor; use yes/no as before. */
       yes: MainFlowStep[];
       no: MainFlowStep[];
     };

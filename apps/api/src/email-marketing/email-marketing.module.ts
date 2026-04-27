@@ -16,8 +16,10 @@ import { EmailTemplatesService } from './email-templates.service';
 import { ListSyncService } from './list-sync.service';
 import { OauthProvidersController } from './oauth-providers.controller';
 import { PublicEmailController } from './public-email.controller';
+import { NotificationsModule } from '../notifications/notifications.module';
 
 @Module({
+  imports: [NotificationsModule],
   controllers: [
     EmailListsController,
     EmailTemplatesController,

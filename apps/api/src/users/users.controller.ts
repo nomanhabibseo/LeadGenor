@@ -8,7 +8,7 @@ import { PrismaService } from '../prisma/prisma.service';
 class TrashRetentionDto {
   @IsInt()
   @Min(1)
-  @Max(365)
+  @Max(30)
   trashRetentionDays!: number;
 }
 
@@ -24,7 +24,7 @@ class UserSettingsDto {
   @IsOptional()
   @IsInt()
   @Min(1)
-  @Max(365)
+  @Max(30)
   trashRetentionDays?: number;
 }
 
@@ -52,7 +52,7 @@ export class UsersController {
 
   @Get('me')
   async me(@CurrentUser() user: JwtUser) {
-    return this.prisma.user.findUniqueOrThrow({
+    const row = await this.prisma.user.findUniqueOrThrow({
       where: { id: user.userId },
       select: {
         id: true,
@@ -63,6 +63,7 @@ export class UsersController {
         trashToggles: true,
       },
     });
+    return { ...row, trashRetentionDays: row.trashRetentionDays ?? 7 };
   }
 
   @Patch('me')
