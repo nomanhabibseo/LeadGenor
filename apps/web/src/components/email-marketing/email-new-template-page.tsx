@@ -184,7 +184,7 @@ export function EmailNewTemplatePage() {
         setSaving(false);
         return;
       }
-      const created = await createTemplate.mutateAsync({
+      await createTemplate.mutateAsync({
         folderId: fid,
         name: nm,
         subject,

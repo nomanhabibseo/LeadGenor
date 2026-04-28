@@ -11,7 +11,6 @@ import { sessionQueryUserKey } from "@/lib/session-query-scope";
 import { DrTableMeter, NicheTablePill } from "@/components/table-status-badges";
 import { DataTableRowMenu, type RowMenuItem } from "@/components/data-table-row-menu";
 import { TrafficSparkline } from "@/components/traffic-sparkline";
-import { iso2ToFlagEmoji } from "@/lib/flag-emoji";
 import { countryShortLabel, nicheFirstWord } from "@/lib/vendor-table-display";
 import { findEmailsFromUrl, findEmailsFromUrls } from "@/lib/email-finder";
 
