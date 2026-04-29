@@ -32,6 +32,14 @@ function needsAuth(pathname: string) {
 
 export async function middleware(request: NextRequest) {
   const { pathname, search } = request.nextUrl;
+  const host = request.headers.get("host")?.toLowerCase();
+
+  // Enforce canonical apex domain in production.
+  if (host === "www.leadgenor.com") {
+    const target = new URL(request.url);
+    target.hostname = "leadgenor.com";
+    return NextResponse.redirect(target, 308);
+  }
 
   if (isAlwaysPublic(pathname)) {
     return NextResponse.next();
