@@ -11,10 +11,11 @@ function isAlwaysPublic(pathname: string) {
   return false;
 }
 
-const PUBLIC_EXACT = new Set(["/", "/login", "/register", "/forgot-password"]);
+const PUBLIC_EXACT = new Set(["/", "/login", "/register", "/forgot-password", "/onboarding/plan", "/pricing"]);
 
 const PROTECTED_PREFIXES = [
   "/dashboard",
+  "/admin",
   "/vendors",
   "/clients",
   "/orders",
@@ -34,6 +35,15 @@ export async function middleware(request: NextRequest) {
   const { pathname, search } = request.nextUrl;
   const host = request.headers.get("host")?.toLowerCase();
 
+  /** Browsers request `/favicon.ico` implicitly; rewrite to PNG so the tab icon matches `LeadGenor-site-icon.png`. */
+  if (pathname === "/favicon.ico") {
+    const u = request.nextUrl.clone();
+    u.pathname = "/LeadGenor-site-icon.png";
+    const res = NextResponse.rewrite(u);
+    res.headers.set("Cache-Control", "public, max-age=0, must-revalidate");
+    return res;
+  }
+
   // Enforce canonical apex domain in production.
   if (host === "www.leadgenor.com") {
     const target = new URL(request.url);
@@ -52,12 +62,12 @@ export async function middleware(request: NextRequest) {
   }
 
   const secret = process.env.NEXTAUTH_SECRET;
+  const token = secret ? await getToken({ req: request, secret }) : null;
+
   if (!secret) {
-    console.error("[middleware] NEXTAUTH_SECRET is not set; allowing request through.");
-    return NextResponse.next();
+    console.error("[middleware] NEXTAUTH_SECRET is not set; gated routes redirect to login (token cannot be validated).");
   }
 
-  const token = await getToken({ req: request, secret });
   if (!token) {
     const login = new URL("/login", request.url);
     login.searchParams.set("callbackUrl", `${pathname}${search}`);
@@ -69,9 +79,10 @@ export async function middleware(request: NextRequest) {
 
 export const config = {
   matcher: [
+    "/favicon.ico",
     /*
-     * Run on app HTML navigations only — exclude static chunks, images, and files with extensions.
-     * (Same idea as Next.js + next-auth docs; avoids breaking `/_next/static/*`.)
+     * Run on app navigations — exclude static chunks, images, and files with extensions.
+     * `/favicon.ico` is matched above so middleware can rewrite it to PNG.
      */
     "/((?!_next/static|_next/image|favicon.ico|.*\\..*).*)",
   ],

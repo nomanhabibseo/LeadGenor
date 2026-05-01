@@ -19,6 +19,8 @@ export class AuthService {
         email: email.toLowerCase(),
         passwordHash,
         name: name.trim(),
+        /** Must finish `/onboarding/plan` flow before full dashboard use. */
+        planChosenAt: null,
       },
     });
     return this.issueTokens(user.id, user.email, user.name);

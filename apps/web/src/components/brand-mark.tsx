@@ -5,24 +5,26 @@ import { cn } from "@/lib/utils";
 /** Per agent.md: prominent logo in header/sidebar — use `marketing` / `sidebar` / `auth` for sizing. */
 const VARIANT = {
   marketing: {
-    width: 300,
-    height: 78,
-    className: "h-[78px] w-auto max-w-[min(92vw,340px)] min-w-[200px]",
+    width: 800,
+    height: 250,
+    className:
+      "h-[78px] w-auto max-h-[78px] max-w-[min(92vw,340px)] shrink-0 object-contain object-left [min-width:unset]",
   },
   sidebar: {
-    width: 248,
-    height: 64,
-    className: "h-16 w-auto max-w-[260px] min-w-[180px]",
+    width: 800,
+    height: 250,
+    className:
+      "h-16 w-auto max-w-[260px] shrink-0 object-contain object-left [min-width:unset] md:max-w-[232px]",
   },
   auth: {
-    width: 280,
-    height: 72,
-    className: "h-[72px] w-auto max-w-[300px]",
+    width: 800,
+    height: 250,
+    className: "h-[72px] w-auto max-w-[300px] shrink-0 object-contain object-left [min-width:unset]",
   },
   compact: {
-    width: 200,
-    height: 52,
-    className: "h-[52px] w-auto max-w-[220px]",
+    width: 800,
+    height: 250,
+    className: "h-[52px] w-auto max-w-[220px] shrink-0 object-contain object-left [min-width:unset]",
   },
 } as const;
 
@@ -49,6 +51,7 @@ export function BrandMark({ variant = "marketing", width, height, className, pri
       className={cn(v.className, className)}
       priority={priority}
       sizes="(max-width: 768px) 90vw, 340px"
+      unoptimized
     />
   );
 }

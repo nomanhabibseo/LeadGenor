@@ -16,8 +16,25 @@ async function bootstrap() {
       transformOptions: { enableImplicitConversion: true },
     }),
   );
+  const configuredWeb = (process.env.WEB_ORIGIN || 'http://localhost:3000').replace(/\/$/, '');
+  const extraWebOrigins = (process.env.WEB_ORIGINS || '')
+    .split(',')
+    .map((s) => s.trim().replace(/\/$/, ''))
+    .filter(Boolean);
+  const allowedOrigins = new Set([
+    configuredWeb,
+    ...extraWebOrigins,
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
+  ]);
   app.enableCors({
-    origin: process.env.WEB_ORIGIN || 'http://localhost:3000',
+    origin: (origin, callback) => {
+      if (!origin) {
+        callback(null, true);
+        return;
+      }
+      callback(null, allowedOrigins.has(origin));
+    },
     credentials: true,
   });
   const port = process.env.PORT ?? 4000;

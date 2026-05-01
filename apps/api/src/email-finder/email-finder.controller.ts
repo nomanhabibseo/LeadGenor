@@ -1,6 +1,8 @@
 import { Body, Controller, Post, UseGuards } from '@nestjs/common';
 import { ArrayMaxSize, ArrayMinSize, IsArray, IsString, MaxLength } from 'class-validator';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { CurrentUser, JwtUser } from '../common/decorators/current-user.decorator';
+import { SubscriptionService } from '../subscription/subscription.service';
 import { EmailFinderService } from './email-finder.service';
 
 class FindFromUrlDto {
@@ -21,10 +23,14 @@ class FindBulkDto {
 @Controller('email-finder')
 @UseGuards(JwtAuthGuard)
 export class EmailFinderController {
-  constructor(private readonly finder: EmailFinderService) {}
+  constructor(
+    private readonly finder: EmailFinderService,
+    private readonly subscription: SubscriptionService,
+  ) {}
 
   @Post('from-url')
-  async fromUrl(@Body() body: FindFromUrlDto) {
+  async fromUrl(@CurrentUser() user: JwtUser, @Body() body: FindFromUrlDto) {
+    await this.subscription.assertAndReserveFinderUrls(user.userId, [body.url]);
     const r = await this.finder.findEmailsFromSiteUrl(body.url);
     if (r.ok) return { emails: r.emails };
     if (r.reason === 'not_found') return { emails: [], notFound: true };
@@ -32,7 +38,8 @@ export class EmailFinderController {
   }
 
   @Post('from-urls')
-  async fromUrls(@Body() body: FindBulkDto) {
+  async fromUrls(@CurrentUser() user: JwtUser, @Body() body: FindBulkDto) {
+    await this.subscription.assertAndReserveFinderUrls(user.userId, body.urls ?? []);
     const urls = body.urls ?? [];
     const out: { url: string; emails: string[]; notFound: boolean }[] = [];
     const chunk = 4;

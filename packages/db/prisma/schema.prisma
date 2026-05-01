@@ -12,6 +12,12 @@ enum TatUnit {
   DAYS
 }
 
+enum SubscriptionTier {
+  FREE
+  PRO
+  BUSINESS
+}
+
 enum DealStatus {
   DEAL_DONE
   PENDING
@@ -52,21 +58,31 @@ model User {
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 
+  /** Stored tier from billing; FREE when expired past subscriptionEndsAt. */
+  subscriptionTier   SubscriptionTier @default(FREE)
+  /** Exclusive end instant for PAID tiers; unused for perpetual FREE users. */
+  subscriptionEndsAt DateTime?
+  /** When null, redirect to onboarding to pick Free / paid instruction flow. Existing users migrated to createdAt. */
+  planChosenAt       DateTime?
+
   vendors Vendor[]
   clients Client[]
   orders  Order[]
 
-  emailLists          EmailList[]
-  templateFolders     TemplateFolder[]
-  emailTemplates      EmailTemplate[]
-  emailAccounts       EmailAccount[]
-  campaigns           Campaign[]
-  emailSuppressions   EmailSuppression[]
-  inboxMessages       InboxMessage[]
-  campaignSendLogs    CampaignSendLog[]
-  oauthStates         OAuthState[]
-  emailOAuthPendings  EmailOAuthPending[]
-  notifications       Notification[]
+  emailLists               EmailList[]
+  templateFolders          TemplateFolder[]
+  emailTemplates           EmailTemplate[]
+  emailAccounts            EmailAccount[]
+  campaigns                Campaign[]
+  emailSuppressions        EmailSuppression[]
+  inboxMessages            InboxMessage[]
+  campaignSendLogs         CampaignSendLog[]
+  oauthStates              OAuthState[]
+  emailOAuthPendings       EmailOAuthPending[]
+  notifications            Notification[]
+  subscriptionUsageMonths  SubscriptionUsageMonth[]
+  emailFinderUsageUrls     EmailFinderUsageUrl[]
+  mailboxSyncUsages        MailboxSyncUsage[]
 }
 
 enum EmailListAutoUpdate {
@@ -655,4 +671,42 @@ model ExchangeRate {
 
   @@unique([currencyId, date])
   @@index([date])
+}
+
+/** Monotonic quota counters per user per calendar month (UTC). Deletes do not roll back counters. */
+model SubscriptionUsageMonth {
+  id                   String @id @default(cuid())
+  userId               String
+  user                 User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /** YYYY-MM (UTC). */
+  ym                   String
+
+  listsCreatedCount     Int @default(0)
+  prospectsAddedCount   Int @default(0)
+  campaignsCreatedCount Int @default(0)
+  mailboxSyncCount      Int @default(0)
+
+  @@unique([userId, ym])
+  @@index([userId, ym])
+}
+
+/** Unique finder site URLs billed per UTC month toward plan limits. */
+model EmailFinderUsageUrl {
+  id      String @id @default(cuid())
+  userId  String
+  user    User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ym      String
+  urlNorm String
+
+  @@unique([userId, ym, urlNorm])
+  @@index([userId, ym])
+}
+
+model MailboxSyncUsage {
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ym     String
+  count  Int    @default(0)
+
+  @@id([userId, ym])
 }

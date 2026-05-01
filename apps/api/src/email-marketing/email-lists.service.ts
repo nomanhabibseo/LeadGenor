@@ -15,12 +15,16 @@ import { normalizeSiteUrl } from '@leadgenor/shared';
 import * as Papa from 'papaparse';
 import { jsPDF } from 'jspdf';
 import { PrismaService } from '../prisma/prisma.service';
+import { SubscriptionService } from '../subscription/subscription.service';
 import { parseEmailListCsv } from './email-list-import';
 import { fetchGoogleSheetAsCsv } from './google-sheet-csv';
 
 @Injectable()
 export class EmailListsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly subscription: SubscriptionService,
+  ) {}
 
   async list(userId: string) {
     return this.prisma.emailList.findMany({
@@ -51,9 +55,24 @@ export class EmailListsService {
   async create(userId: string, name: string) {
     const n = name.trim();
     if (!n) throw new BadRequestException('List name is required.');
+    const dup = await this.prisma.emailList.findFirst({
+      where: {
+        userId,
+        deletedAt: null,
+        name: { equals: n, mode: 'insensitive' },
+      },
+    });
+    if (dup) {
+      throw new ConflictException(
+        'A list with this name already exists. Please choose a different name.',
+      );
+    }
     try {
-      return await this.prisma.emailList.create({
-        data: { userId, name: n, autoUpdate: EmailListAutoUpdate.OFF },
+      return await this.prisma.$transaction(async (tx) => {
+        await this.subscription.assertAndConsumeNewList(userId, tx);
+        return tx.emailList.create({
+          data: { userId, name: n, autoUpdate: EmailListAutoUpdate.OFF },
+        });
       });
     } catch (e) {
       if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
@@ -131,36 +150,46 @@ export class EmailListsService {
   async addItems(userId: string, listId: string, rows: ReturnType<typeof parseEmailListCsv>['rows']) {
     await this.get(userId, listId);
     if (!rows.length) return { added: 0 };
-    let added = 0;
+    let newCreatesPlanned = 0;
     for (const r of rows) {
       const existing = await this.prisma.emailListItem.findFirst({
         where: { listId, siteUrlNormalized: r.siteUrlNormalized },
       });
-      const payload = {
-        siteUrl: r.siteUrl,
-        siteUrlNormalized: r.siteUrlNormalized,
-        companyName: r.companyName,
-        contactName: r.contactName,
-        contactKind: r.contactKind,
-        niche: r.niche,
-        country: r.country,
-        traffic: r.traffic,
-        dr: r.dr,
-        da: r.da,
-        authorityScore: r.authorityScore,
-        backlinks: r.backlinks,
-        referringDomains: r.referringDomains,
-        emails: r.emails as unknown as Prisma.InputJsonValue,
-        emailRisk: r.emailRisk,
-      };
-      if (existing) {
-        await this.prisma.emailListItem.update({ where: { id: existing.id }, data: payload });
-      } else {
-        await this.prisma.emailListItem.create({ data: { listId, ...payload } });
-        added++;
-      }
+      if (!existing) newCreatesPlanned++;
     }
-    return { added };
+    let added = 0;
+    return await this.prisma.$transaction(async (tx) => {
+      await this.subscription.assertConsumeProspectsAdded(tx, userId, newCreatesPlanned);
+      for (const r of rows) {
+        const existing = await tx.emailListItem.findFirst({
+          where: { listId, siteUrlNormalized: r.siteUrlNormalized },
+        });
+        const payload = {
+          siteUrl: r.siteUrl,
+          siteUrlNormalized: r.siteUrlNormalized,
+          companyName: r.companyName,
+          contactName: r.contactName,
+          contactKind: r.contactKind,
+          niche: r.niche,
+          country: r.country,
+          traffic: r.traffic,
+          dr: r.dr,
+          da: r.da,
+          authorityScore: r.authorityScore,
+          backlinks: r.backlinks,
+          referringDomains: r.referringDomains,
+          emails: r.emails as unknown as Prisma.InputJsonValue,
+          emailRisk: r.emailRisk,
+        };
+        if (existing) {
+          await tx.emailListItem.update({ where: { id: existing.id }, data: payload });
+        } else {
+          await tx.emailListItem.create({ data: { listId, ...payload } });
+          added++;
+        }
+      }
+      return { added };
+    });
   }
 
   async removeItems(userId: string, listId: string, itemIds: string[]) {

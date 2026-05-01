@@ -16,11 +16,13 @@ import {
   MailOpen,
   Reply,
   Pause,
+  Sparkles,
   User,
   Trash2,
 } from "lucide-react";
 import { useAppDialog } from "@/contexts/app-dialog-context";
 import { apiFetch } from "@/lib/api";
+import type { UsersMePayload } from "@/lib/user-subscription";
 import { sessionQueryUserKey } from "@/lib/session-query-scope";
 import { cn } from "@/lib/utils";
 import { TablePagination } from "@/components/table-pagination";
@@ -43,6 +45,8 @@ type Camp = {
   openRatePct: number;
   replyRatePct: number;
   senderAccountNames: string[];
+  /** Present when `/email-marketing/campaigns` includes subscription gating hints. */
+  engagementStats?: boolean;
 };
 
 const SENDER_CHIPS_MAX = 3;
@@ -167,6 +171,12 @@ export function EmailCampaignsPage() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [listPage, setListPage] = useState(1);
 
+  const { data: meSub } = useQuery({
+    queryKey: ["users", "me", token],
+    queryFn: () => apiFetch<UsersMePayload>("/users/me", token),
+    enabled: status === "authenticated" && !!token,
+  });
+
   const { data: rows = [], isError, error, refetch, isFetching } = useQuery({
     queryKey: ["campaigns", userKey],
     queryFn: () => apiFetch<Camp[]>("/email-marketing/campaigns", token),
@@ -266,6 +276,28 @@ export function EmailCampaignsPage() {
     }
   }
 
+  function guardNewCampaign(e: React.MouseEvent) {
+    const s = meSub?.subscription;
+    if (!s) return;
+    if (
+      s.effectiveTier === "FREE" &&
+      s.limits.campaignDraftsThisMonthMax != null &&
+      s.usage.campaignDraftsThisMonth >= s.limits.campaignDraftsThisMonthMax
+    ) {
+      e.preventDefault();
+      void showAlert(
+        "Your free plan allows 1 new campaign per UTC month. Wait until next month or upgrade to Pro/Business.",
+      );
+      return;
+    }
+    if (s.effectiveTier === "FREE" && s.banners.monthlyEmailsExhausted) {
+      e.preventDefault();
+      void showAlert(
+        "Your monthly free email sending limit is used up. Wait until next month or upgrade via Plans.",
+      );
+    }
+  }
+
   async function onDeleteClick(c: Camp) {
     if (c.status === "RUNNING") {
       await showAlert("You cannot delete a campaign while it is running. Pause the campaign first, then you can delete it.");
@@ -351,6 +383,7 @@ export function EmailCampaignsPage() {
           <Link
             href="/email-marketing/campaigns/new"
             className="em-btn-primary inline-flex h-9 items-center justify-center gap-1.5 whitespace-nowrap px-4"
+            onClick={guardNewCampaign}
           >
             + New campaign
           </Link>
@@ -370,6 +403,7 @@ export function EmailCampaignsPage() {
       ) : (
         <ul className="space-y-4">
           {pagedRows.map((c, i) => {
+            const engagement = c.engagementStats !== false;
             const created = new Date(c.createdAt);
             const rowNo = rangeFrom + i;
             const leftAccent =
@@ -465,23 +499,37 @@ export function EmailCampaignsPage() {
                     </div>
                     <div className="flex flex-col items-center rounded-md border border-slate-200/80 bg-slate-50/95 px-2 py-1.5 text-center dark:border-slate-600/70 dark:bg-slate-800/60">
                       <div className="text-[8px] font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">Opened</div>
-                      <div className="mt-0.5 flex items-center justify-center gap-1">
-                        <MailOpen className="h-3 w-3 shrink-0 text-emerald-500" />
-                        <span className="text-xs font-semibold tabular-nums text-slate-900 dark:text-white">
-                          {c.openedRecipients ?? 0}{" "}
-                          <span className="text-[10px] font-medium text-slate-500">({(c.openRatePct ?? 0)}%)</span>
-                        </span>
-                      </div>
+                      {engagement ? (
+                        <div className="mt-0.5 flex items-center justify-center gap-1">
+                          <MailOpen className="h-3 w-3 shrink-0 text-emerald-500" />
+                          <span className="text-xs font-semibold tabular-nums text-slate-900 dark:text-white">
+                            {c.openedRecipients ?? 0}{" "}
+                            <span className="text-[10px] font-medium text-slate-500">({c.openRatePct ?? 0}%)</span>
+                          </span>
+                        </div>
+                      ) : (
+                        <div className="mt-0.5 flex flex-col items-center gap-0.5 text-[10px] font-semibold text-violet-700 dark:text-violet-300">
+                          <Sparkles className="h-4 w-4" aria-hidden />
+                          <span>Paid plan</span>
+                        </div>
+                      )}
                     </div>
                     <div className="flex flex-col items-center rounded-md border border-slate-200/80 bg-slate-50/95 px-2 py-1.5 text-center dark:border-slate-600/70 dark:bg-slate-800/60">
                       <div className="text-[8px] font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">Replied</div>
-                      <div className="mt-0.5 flex items-center justify-center gap-1">
-                        <Reply className="h-3 w-3 shrink-0 text-violet-500" />
-                        <span className="text-xs font-semibold tabular-nums text-slate-900 dark:text-white">
-                          {c.repliedRecipients ?? 0}{" "}
-                          <span className="text-[10px] font-medium text-slate-500">({(c.replyRatePct ?? 0)}%)</span>
-                        </span>
-                      </div>
+                      {engagement ? (
+                        <div className="mt-0.5 flex items-center justify-center gap-1">
+                          <Reply className="h-3 w-3 shrink-0 text-violet-500" />
+                          <span className="text-xs font-semibold tabular-nums text-slate-900 dark:text-white">
+                            {c.repliedRecipients ?? 0}{" "}
+                            <span className="text-[10px] font-medium text-slate-500">({c.replyRatePct ?? 0}%)</span>
+                          </span>
+                        </div>
+                      ) : (
+                        <div className="mt-0.5 flex flex-col items-center gap-0.5 text-[10px] font-semibold text-violet-700 dark:text-violet-300">
+                          <Sparkles className="h-4 w-4" aria-hidden />
+                          <span>Paid plan</span>
+                        </div>
+                      )}
                     </div>
                   </div>
 

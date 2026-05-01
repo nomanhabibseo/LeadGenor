@@ -1,7 +1,34 @@
-const base = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:4000";
+/** Must match rewrite `LG_DEV_API_PROXY` in apps/web/next.config.ts */
+const NEXT_DEV_API_PROXY_SEGMENT = "/lg-api-proxy";
+
+function serverAbsoluteBase(): string {
+  const fromPublic = process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "");
+  if (fromPublic) return fromPublic;
+  const fromApi = process.env.API_URL?.trim().replace(/\/$/, "");
+  if (fromApi) return fromApi;
+  return "http://127.0.0.1:4000";
+}
+
+/**
+ * In development, browser calls must go through Next rewrites (`/lg-api-proxy/…`) so they work when you open
+ * the app as http://LAN_IP:3000 — direct `NEXT_PUBLIC_API_URL=http://localhost:4000` would hit the wrong host.
+ * Set `NEXT_PUBLIC_DEV_USE_DIRECT_API=1` only if you intentionally want the browser to call the absolute API URL.
+ */
+function browserUsesDevProxy(): boolean {
+  if (typeof window === "undefined") return false;
+  if (process.env.NODE_ENV !== "development") return false;
+  const forceDirect =
+    /^1|true$/i.test((process.env.NEXT_PUBLIC_DEV_USE_DIRECT_API ?? "").trim());
+  return !forceDirect;
+}
 
 export function apiUrl(path: string) {
-  return `${base.replace(/\/$/, "")}${path.startsWith("/") ? path : `/${path}`}`;
+  const p = path.startsWith("/") ? path : `/${path}`;
+  if (browserUsesDevProxy()) {
+    return `${NEXT_DEV_API_PROXY_SEGMENT}${p}`;
+  }
+  const base = serverAbsoluteBase().replace(/\/$/, "");
+  return `${base}${p}`;
 }
 
 export async function apiFetch<T>(

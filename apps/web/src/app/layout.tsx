@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { Providers } from "@/components/providers";
-import { LOGO_PATH } from "@/lib/branding";
+import { FAVICON_PATH } from "@/lib/branding";
 import { getThemeBootstrapScript } from "@/lib/theme-storage";
 import "./globals.css";
 
@@ -19,7 +19,15 @@ export const metadata: Metadata = {
   title: "LeadGenor – Guest Posting CRM & Cold Email Outreach Platform.",
   description:
     "Manage guest post vendors, clients and orders in one place. Automate cold email outreach, find emails, and run drip campaigns 10x faster than Google Sheets.",
-  icons: [{ rel: "icon", url: LOGO_PATH }],
+  icons: {
+    /** Matches `next.config` rewrite: `/favicon.ico` → `LeadGenor-site-icon.png` */
+    icon: [
+      { url: "/favicon.ico", sizes: "any" },
+      { url: FAVICON_PATH, type: "image/png", sizes: "512x512" },
+    ],
+    apple: [{ url: FAVICON_PATH, type: "image/png" }],
+    shortcut: ["/favicon.ico"],
+  },
 };
 
 export default function RootLayout({

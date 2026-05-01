@@ -15,6 +15,7 @@ import {
 } from '@prisma/client';
 import { randomBytes } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
+import { SubscriptionService } from '../subscription/subscription.service';
 import { resolveMainChainFromCampaign, type ChainStep } from './compile-main-flow';
 import { applyMergeTemplate, buildMergeVars, missingMergeVars } from './merge-tags';
 import {
@@ -42,9 +43,13 @@ function parseSenderAccountIds(raw: unknown): string[] {
 
 @Injectable()
 export class EmailCampaignsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly subscription: SubscriptionService,
+  ) {}
 
   async completedReports(userId: string) {
+    const limEngagement = await this.subscription.getLimits(userId);
     const campaigns = await this.prisma.campaign.findMany({
       where: { userId, deletedAt: null, status: CampaignStatus.COMPLETED },
       orderBy: { completedAt: 'desc' },
@@ -121,10 +126,12 @@ export class EmailCampaignsService {
       prospects: prospectsByCampaign.get(c.id) ?? 0,
       totalSentEmails: sentByCampaign.get(c.id) ?? 0,
       byAccount: accountsByCampaign.get(c.id) ?? [],
+      engagementStats: limEngagement.engagementStats,
     }));
   }
 
   async sendReports(userId: string, statuses: CampaignStatus[] = [CampaignStatus.RUNNING, CampaignStatus.COMPLETED]) {
+    const limEngagement = await this.subscription.getLimits(userId);
     const campaigns = await this.prisma.campaign.findMany({
       where: { userId, deletedAt: null, status: { in: statuses } },
       orderBy: [{ status: 'asc' }, { updatedAt: 'desc' }],
@@ -198,6 +205,7 @@ export class EmailCampaignsService {
       emailList: c.emailList,
       totalSentEmails: sentByCampaign.get(c.id) ?? 0,
       byAccount: accountsByCampaign.get(c.id) ?? [],
+      engagementStats: limEngagement.engagementStats,
     }));
   }
 
@@ -212,6 +220,7 @@ export class EmailCampaignsService {
       select: { id: true, name: true, status: true },
     });
     if (!camp) throw new NotFoundException('Campaign not found.');
+    const limEngagement = await this.subscription.getLimits(userId);
 
     const rows = await this.prisma.campaignSendLog.findMany({
       where: { userId, campaignId, emailAccountId },
@@ -239,10 +248,11 @@ export class EmailCampaignsService {
     return {
       campaign: camp,
       emailAccountId,
+      engagementStats: limEngagement.engagementStats,
       rows: rows.map((r) => ({
         sentAt: r.sentAt,
-        replied: r.recipient?.replied ?? false,
-        opened: r.recipient?.opened ?? false,
+        replied: limEngagement.engagementStats ? (r.recipient?.replied ?? false) : false,
+        opened: limEngagement.engagementStats ? (r.recipient?.opened ?? false) : false,
         targetEmail: r.recipient?.targetEmail || r.targetEmail || '',
         companyName: r.recipient?.emailListItem?.companyName ?? '',
         siteUrl: r.recipient?.emailListItem?.siteUrl ?? '',
@@ -319,6 +329,8 @@ export class EmailCampaignsService {
       accountRows.map((a) => [a.id, (a.displayName || '').trim() || a.id]),
     );
 
+    const limEngagement = await this.subscription.getLimits(userId);
+
     const [sentGroups, remainingGroups, openedGroups, repliedGroups] = await Promise.all([
       this.prisma.campaignRecipient.groupBy({
         by: ['campaignId'],
@@ -358,8 +370,12 @@ export class EmailCampaignsService {
     const repliedMap = new Map(repliedGroups.map((g) => [g.campaignId, g._count._all]));
     return rows.map((r) => {
       const sent = sentMap.get(r.id) ?? 0;
-      const opened = openedMap.get(r.id) ?? 0;
-      const replied = repliedMap.get(r.id) ?? 0;
+      let opened = openedMap.get(r.id) ?? 0;
+      let replied = repliedMap.get(r.id) ?? 0;
+      if (!limEngagement.engagementStats) {
+        opened = 0;
+        replied = 0;
+      }
       const senderAccountNames = parseSenderAccountIds(r.senderAccountIds).map(
         (id) => displayNameByAccountId.get(id) ?? 'Unknown account',
       );
@@ -372,6 +388,7 @@ export class EmailCampaignsService {
         openRatePct: sent > 0 ? Math.round((opened / sent) * 100) : 0,
         replyRatePct: sent > 0 ? Math.round((replied / sent) * 100) : 0,
         senderAccountNames,
+        engagementStats: limEngagement.engagementStats,
       };
     });
   }
@@ -391,22 +408,26 @@ export class EmailCampaignsService {
   async createDraft(userId: string, name: string) {
     const nm = name?.trim() || `New campaign ${randomBytes(3).toString('hex')}`;
     await this.assertCampaignNameUnique(userId, nm);
-    let list = await this.prisma.emailList.findFirst({
-      where: { userId, deletedAt: null },
-      orderBy: { updatedAt: 'desc' },
-    });
-    if (!list) {
-      list = await this.prisma.emailList.create({
-        data: { userId, name: 'My list', autoUpdate: EmailListAutoUpdate.OFF },
+    return this.prisma.$transaction(async (tx) => {
+      await this.subscription.assertAndConsumeNewCampaignDraft(userId, tx);
+      let list = await tx.emailList.findFirst({
+        where: { userId, deletedAt: null },
+        orderBy: { updatedAt: 'desc' },
       });
-    }
-    return this.prisma.campaign.create({
-      data: {
-        userId,
-        name: nm,
-        emailListId: list.id,
-        status: CampaignStatus.DRAFT,
-      },
+      if (!list) {
+        await this.subscription.assertAndConsumeNewList(userId, tx);
+        list = await tx.emailList.create({
+          data: { userId, name: 'My list', autoUpdate: EmailListAutoUpdate.OFF },
+        });
+      }
+      return tx.campaign.create({
+        data: {
+          userId,
+          name: nm,
+          emailListId: list.id,
+          status: CampaignStatus.DRAFT,
+        },
+      });
     });
   }
 
@@ -451,6 +472,14 @@ export class EmailCampaignsService {
       }
       return this.prisma.campaign.update({ where: { id }, data });
     }
+
+    const effTier = await this.subscription.effectiveTier(userId);
+    this.subscription.assertCampaignSequences(effTier, {
+      senderAccountIds: body.senderAccountIds ?? (c.senderAccountIds as unknown),
+      mainSequence: body.mainSequence ?? (c.mainSequence as unknown),
+      followUpSequence: body.followUpSequence ?? (c.followUpSequence as unknown),
+      mainFlowGraph: body.mainFlowGraph ?? (c.mainFlowGraph as unknown),
+    });
 
     if (body.name !== undefined && typeof body.name === 'string') {
       await this.assertCampaignNameUnique(userId, body.name, id);
@@ -547,9 +576,17 @@ export class EmailCampaignsService {
     });
     if (!campaign) throw new NotFoundException('Campaign not found.');
 
+    await this.subscription.assertCampaignListRecipientCap(userId, campaign.emailListId);
+
     const items = await this.prisma.emailListItem.findMany({ where: { listId: campaign.emailListId } });
     const senderIds = parseSenderAccountIds(campaign.senderAccountIds);
     if (!senderIds.length) throw new BadRequestException('Select at least one sender account.');
+    const limAccounts = await this.subscription.getLimits(userId);
+    if (limAccounts.sendersPerCampaign != null && senderIds.length > limAccounts.sendersPerCampaign) {
+      throw new BadRequestException(
+        `Your plan allows ${limAccounts.sendersPerCampaign} sender account(s) per campaign.`,
+      );
+    }
 
     const hadUsableSequenceInDb = ((campaign.mainSequence as unknown as ChainStep[]) ?? []).some(
       (x) => x?.templateId,

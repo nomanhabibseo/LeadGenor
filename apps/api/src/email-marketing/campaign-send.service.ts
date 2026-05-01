@@ -14,6 +14,7 @@ import { EmailOAuthMailService } from './email-oauth-mail.service';
 import { htmlToPlainText } from './email-html-plain';
 import { applyMergeTemplate, buildMergeVars } from './merge-tags';
 import { NotificationsService } from '../notifications/notifications.service';
+import { SubscriptionService } from '../subscription/subscription.service';
 import {
   INLINE_UNSUBSCRIBE_HREF,
   bodyHasInlineUnsubscribe,
@@ -48,6 +49,7 @@ export class CampaignSendService {
     private readonly campaigns: EmailCampaignsService,
     private readonly oauthMail: EmailOAuthMailService,
     private readonly notifications: NotificationsService,
+    private readonly subscriptions: SubscriptionService,
   ) {}
 
   /** Release rows left ACTIVE after a crash mid-send (claim uses ACTIVE as a lock). */
@@ -144,7 +146,12 @@ export class CampaignSendService {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private async processRecipient(rec: any) {
     const camp = rec.campaign;
-    if (camp.status !== CampaignStatus.RUNNING) return;
+    await this.subscriptions.enforceMonthlyEmailSendBudget(camp.userId);
+    const alive = await this.prisma.campaign.findUnique({
+      where: { id: camp.id },
+      select: { status: true },
+    });
+    if (alive?.status !== CampaignStatus.RUNNING) return;
 
     const now = new Date();
     const preserveNext = rec.nextSendAt as Date | null;

@@ -20,6 +20,7 @@ type Row = {
 type Drill = {
   campaign: { id: string; name: string; status: string };
   emailAccountId: string;
+  engagementStats?: boolean;
   rows: {
     sentAt: string;
     replied: boolean;
@@ -238,12 +239,18 @@ export default function ReportsPage() {
                           {new Date(r.sentAt).toLocaleString()}
                         </td>
                         <td className="px-4 py-3 whitespace-nowrap">
-                          {r.replied ? (
-                            <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-bold text-emerald-800 dark:bg-emerald-950/35 dark:text-emerald-200">
-                              Yes
-                            </span>
+                          {drill?.engagementStats !== false ? (
+                            r.replied ? (
+                              <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-bold text-emerald-800 dark:bg-emerald-950/35 dark:text-emerald-200">
+                                Yes
+                              </span>
+                            ) : (
+                              <span className="text-slate-400">No</span>
+                            )
                           ) : (
-                            <span className="text-slate-400">No</span>
+                            <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-violet-700 dark:text-violet-300">
+                              Paid plan
+                            </span>
                           )}
                         </td>
                       </tr>

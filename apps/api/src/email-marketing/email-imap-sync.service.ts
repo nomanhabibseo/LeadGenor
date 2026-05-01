@@ -93,6 +93,36 @@ function imapImplicitTls(port: number, enc: SmtpEncryption): boolean {
 export class EmailImapSyncService {
   private readonly log = new Logger(EmailImapSyncService.name);
 
+  private imapClient(params: {
+    host: string;
+    port: number;
+    secure: boolean;
+    user: string;
+    pass: string;
+    connectionTimeout: number;
+    greetingTimeout: number;
+    socketTimeout: number;
+  }) {
+    const client = new ImapFlow({
+      host: params.host,
+      port: params.port,
+      secure: params.secure,
+      auth: { user: params.user, pass: params.pass },
+      logger: false,
+      connectionTimeout: params.connectionTimeout,
+      greetingTimeout: params.greetingTimeout,
+      socketTimeout: params.socketTimeout,
+    });
+
+    // Prevent Node from crashing on unhandled ImapFlow 'error' events (e.g. ETIMEOUT).
+    client.on('error', (e) => {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.log.warn(`IMAP client error ${params.host}:${params.port} user=${params.user}: ${msg}`);
+    });
+
+    return client;
+  }
+
   hasImapCredentials(acc: Pick<EmailAccount, 'provider' | 'imapHost' | 'imapPort' | 'imapUser' | 'imapPasswordEnc'>): boolean {
     return (
       acc.provider === EmailAccountProvider.SMTP &&
@@ -122,12 +152,12 @@ export class EmailImapSyncService {
     const host = acc.imapHost!.trim();
     const user = acc.imapUser!.trim();
     const secure = imapImplicitTls(port, acc.imapEncryption);
-    const client = new ImapFlow({
+    const client = this.imapClient({
       host,
       port,
       secure,
-      auth: { user, pass },
-      logger: false,
+      user,
+      pass,
       connectionTimeout: 60_000,
       greetingTimeout: 30_000,
       socketTimeout: 120_000,
@@ -220,12 +250,12 @@ export class EmailImapSyncService {
     const user = params.imapUser.trim();
     const pass = params.imapPassword;
     const secure = imapImplicitTls(port, params.imapEncryption);
-    const client = new ImapFlow({
+    const client = this.imapClient({
       host,
       port,
       secure,
-      auth: { user, pass },
-      logger: false,
+      user,
+      pass,
       connectionTimeout: 45_000,
       greetingTimeout: 20_000,
       socketTimeout: 60_000,
@@ -261,12 +291,12 @@ export class EmailImapSyncService {
     const host = acc.imapHost!.trim();
     const user = acc.imapUser!.trim();
     const secure = imapImplicitTls(port, acc.imapEncryption);
-    const client = new ImapFlow({
+    const client = this.imapClient({
       host,
       port,
       secure,
-      auth: { user, pass },
-      logger: false,
+      user,
+      pass,
       connectionTimeout: 45_000,
       greetingTimeout: 20_000,
       socketTimeout: 60_000,

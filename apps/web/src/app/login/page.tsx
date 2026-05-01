@@ -1,11 +1,15 @@
 "use client";
 
 import Link from "next/link";
-import { signIn } from "next-auth/react";
+import { getSession, signIn } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { BrandMark } from "@/components/brand-mark";
+import { MarketingFooter } from "@/components/marketing-footer";
+import { MarketingHeader } from "@/components/marketing-header";
 import { PasswordField } from "@/components/password-field";
+import { apiUrl } from "@/lib/api";
+import type { UsersMePayload } from "@/lib/user-subscription";
 
 const SAVED_EMAIL_KEY = "leadgenor_saved_login_email";
 
@@ -60,18 +64,39 @@ export default function LoginPage() {
       } catch {
         /* ignore */
       }
+      try {
+        const session = await getSession();
+        const t = session?.accessToken as string | undefined;
+        if (t) {
+          const mr = await fetch(apiUrl("/users/me"), { headers: { Authorization: `Bearer ${t}` }, cache: "no-store" });
+          if (mr.ok) {
+            const j = (await mr.json()) as UsersMePayload;
+            if (!j.planChosenAt) {
+              router.push("/pricing");
+              router.refresh();
+              return;
+            }
+          }
+        }
+      } catch {
+        /* fall through */
+      }
       router.push("/dashboard");
       router.refresh();
     }
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-slate-950 px-4 dark:bg-black">
+    <div className="flex min-h-screen flex-col bg-slate-950 dark:bg-black">
       <div className="pointer-events-none fixed inset-0 bg-hero-mesh opacity-60 dark:opacity-40" aria-hidden />
+      <MarketingHeader />
+      <div className="relative z-10 flex flex-1 items-center justify-center px-4 py-10 pb-16">
       <div className="relative w-full max-w-md rounded-2xl border border-white/10 bg-white/95 p-8 shadow-2xl backdrop-blur dark:border-slate-700/80 dark:bg-slate-800/95">
-        <Link href="/" className="mb-8 flex justify-center">
-          <BrandMark variant="auth" priority />
-        </Link>
+        <div className="mb-6 flex justify-center">
+          <Link href="/" className="inline-flex shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-slate-800 rounded-lg">
+            <BrandMark variant="auth" priority className="max-w-[min(100%,280px)]" />
+          </Link>
+        </div>
         <h1 className="text-center text-2xl font-bold text-slate-900 dark:text-slate-100">Welcome back</h1>
         <p className="mt-1 text-center text-sm text-slate-500 dark:text-slate-400">Sign in to your LeadGenor account</p>
         <form onSubmit={onSubmit} className="mt-8 space-y-5">
@@ -126,6 +151,8 @@ export default function LoginPage() {
           </Link>
         </p>
       </div>
+      </div>
+      <MarketingFooter />
     </div>
   );
 }

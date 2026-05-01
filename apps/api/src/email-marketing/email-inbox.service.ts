@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, Logger, NotFoundException } from '@nes
 import { createHash } from 'crypto';
 import { EmailAccountProvider, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { SubscriptionService } from '../subscription/subscription.service';
 import { EmailImapSyncService } from './email-imap-sync.service';
 import { EmailOAuthMailService, type MailboxFolder } from './email-oauth-mail.service';
 
@@ -40,6 +41,7 @@ export class EmailInboxService {
     private readonly prisma: PrismaService,
     private readonly oauthMail: EmailOAuthMailService,
     private readonly imapSync: EmailImapSyncService,
+    private readonly subscription: SubscriptionService,
   ) {}
 
   async list(
@@ -84,6 +86,8 @@ export class EmailInboxService {
       where: { id: accountId, userId, deletedAt: null },
     });
     if (!acc) throw new NotFoundException('Email account not found.');
+
+    await this.subscription.assertMailboxSyncBudget(userId);
 
     let total = 0;
     const byFolder: Record<string, number> = {};
@@ -166,6 +170,8 @@ export class EmailInboxService {
       byFolder[f] = n;
       total += n;
     }
+
+    await this.subscription.recordMailboxSynced(userId);
 
     return {
       synced: total,

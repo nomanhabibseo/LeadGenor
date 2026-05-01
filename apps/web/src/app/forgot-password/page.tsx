@@ -1,16 +1,16 @@
 "use client";
 
 import Link from "next/link";
-import { BrandMark } from "@/components/brand-mark";
+import { MarketingFooter } from "@/components/marketing-footer";
+import { MarketingHeader } from "@/components/marketing-header";
 
 export default function ForgotPasswordPage() {
   return (
-    <div className="flex min-h-screen items-center justify-center bg-slate-950 px-4 dark:bg-black">
+    <div className="flex min-h-screen flex-col bg-slate-950 dark:bg-black">
       <div className="pointer-events-none fixed inset-0 bg-hero-mesh opacity-60 dark:opacity-40" aria-hidden />
+      <MarketingHeader />
+      <div className="relative z-10 flex flex-1 items-center justify-center px-4 py-10 pb-16">
       <div className="relative w-full max-w-md rounded-2xl border border-white/10 bg-white/95 p-8 shadow-2xl backdrop-blur dark:border-slate-700/80 dark:bg-slate-800/95">
-        <Link href="/" className="mb-8 flex justify-center">
-          <BrandMark variant="auth" priority />
-        </Link>
         <h1 className="text-center text-2xl font-bold text-slate-900 dark:text-slate-100">Forgot password</h1>
         <p className="mt-4 text-center text-sm leading-relaxed text-slate-600 dark:text-slate-300">
           Self-service password reset is not enabled for this workspace yet. Please contact your administrator or the
@@ -29,6 +29,8 @@ export default function ForgotPasswordPage() {
           </Link>
         </div>
       </div>
+      </div>
+      <MarketingFooter />
     </div>
   );
 }

@@ -1,6 +1,7 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { CampaignStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { SubscriptionService } from '../subscription/subscription.service';
 
 function collectTemplateIdsFromFlow(nodes: unknown): string[] {
   const ids: string[] = [];
@@ -43,7 +44,10 @@ function templateIdsUsedInCampaign(c: {
 
 @Injectable()
 export class EmailTemplatesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly subscription: SubscriptionService,
+  ) {}
 
   private async templateUseCounts(userId: string): Promise<Map<string, number>> {
     const campaigns = await this.prisma.campaign.findMany({
@@ -162,6 +166,7 @@ export class EmailTemplatesService {
   async createFolder(userId: string, name: string) {
     const n = name.trim();
     if (!n) throw new BadRequestException('Folder name is required.');
+    await this.subscription.assertFolderTemplateCountsForCreateFolder(userId);
     await this.assertFolderNameUnique(userId, n);
     return this.prisma.templateFolder.create({ data: { userId, name: n } });
   }
@@ -237,6 +242,7 @@ export class EmailTemplatesService {
       where: { id: folderId, userId, deletedAt: null },
     });
     if (!folder) throw new NotFoundException('Folder not found.');
+    await this.subscription.assertTemplateCount(userId);
     const n = body.name.trim();
     if (!n) throw new BadRequestException('Template name is required.');
     await this.assertTemplateNameInFolder(userId, folderId, n);

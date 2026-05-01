@@ -1,6 +1,7 @@
 import Link from "next/link";
 import Image from "next/image";
-import { BrandMark } from "@/components/brand-mark";
+import { MarketingFooter } from "@/components/marketing-footer";
+import { MarketingHeader } from "@/components/marketing-header";
 import { ArrowRight, ChevronDown, Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -12,42 +13,24 @@ export default function HomePage() {
     <div className="my-7 h-px w-full bg-white opacity-20 md:my-9" aria-hidden />
   );
   return (
-    <div className="min-h-screen bg-slate-950 text-white dark:bg-black">
+    <div className="flex min-h-screen flex-col bg-slate-950 text-white dark:bg-black">
       <div className="pointer-events-none fixed inset-0 bg-hero-mesh opacity-90" aria-hidden />
-      <header className="sticky top-0 z-50 border-b border-white/10 bg-slate-950/80 backdrop-blur-md">
-        <div className="mx-auto flex max-w-[1200px] items-center justify-between gap-4 px-4 py-3 md:py-4">
-          <Link href="/" className="flex shrink-0 items-center py-1">
-            <BrandMark variant="marketing" priority />
-          </Link>
-          <nav className="flex items-center gap-3 text-sm md:gap-4">
-            <Link
-              href="/login"
-              className="rounded-xl px-4 py-2.5 font-medium text-slate-200 transition hover:bg-white/10 hover:text-white"
-            >
-              Login
-            </Link>
-            <Link
-              href="/register"
-              className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-brand-500 to-accent-violet px-5 py-2.5 font-semibold text-white shadow-brand transition hover:brightness-110"
-            >
-              Get Started
-              <ArrowRight className="h-4 w-4" />
-            </Link>
-          </nav>
-        </div>
-      </header>
+      <MarketingHeader />
 
-      <main className="relative z-10">
+      <main className="relative z-10 flex-1">
         <div className="mx-auto max-w-[1200px] px-4">
           {/* SECTION 1 — HERO */}
           <section className={SectionY}>
             <div className="grid items-center gap-10 lg:grid-cols-[1.05fr_0.95fr]">
               <div className="text-center lg:text-left">
-                <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-4 py-1.5 text-xs font-medium text-cyan-200/90 backdrop-blur">
-                  <Sparkles className="h-3.5 w-3.5 text-amber-400" />
-                  Built for guest posting freelancers
+                <div className="mx-auto inline-flex max-w-2xl flex-wrap items-center justify-center gap-x-2 gap-y-1 rounded-2xl border border-white/10 bg-white/5 px-4 py-2.5 text-left text-xs font-medium leading-relaxed text-cyan-200/90 backdrop-blur sm:text-sm lg:mx-0 lg:justify-start">
+                  <Sparkles className="h-3.5 w-3.5 shrink-0 text-amber-400" />
+                  <span>
+                    Manage guest posting vendors &amp; clients → Create targeted campaigns → Automate personalized drip
+                    email outreach.
+                  </span>
                 </div>
-                <h1 className="mt-7 text-[36px] font-bold leading-tight tracking-tight">
+                <h1 id="About" className="mt-7 scroll-mt-28 text-[36px] font-bold leading-tight tracking-tight">
                   LeadGenor — The Complete Outreach System for Guest Posting Freelancers
                 </h1>
                 <p className={cn("mt-5 max-w-2xl lg:mx-0 lg:max-w-xl", Body)}>
@@ -107,7 +90,7 @@ export default function HomePage() {
                 </div>
               </div>
               <div className="order-1 text-center lg:order-2 lg:text-left">
-                <h2 className={H2}>
+                <h2 id="features" className={cn(H2, "scroll-mt-28")}>
                   Guest Posting Freelancers Are Stuck in Spreadsheets
                 </h2>
                 <div className={cn("mt-4 space-y-4", Body)}>
@@ -560,6 +543,8 @@ export default function HomePage() {
           </section>
         </div>
       </main>
+
+      <MarketingFooter />
     </div>
   );
 }

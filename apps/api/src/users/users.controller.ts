@@ -4,6 +4,7 @@ import * as bcrypt from 'bcryptjs';
 import { CurrentUser, JwtUser } from '../common/decorators/current-user.decorator';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { PrismaService } from '../prisma/prisma.service';
+import { SubscriptionService } from '../subscription/subscription.service';
 
 class TrashRetentionDto {
   @IsInt()
@@ -48,7 +49,10 @@ class UpdateProfileDto {
 @Controller('users')
 @UseGuards(JwtAuthGuard)
 export class UsersController {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly subscription: SubscriptionService,
+  ) {}
 
   @Get('me')
   async me(@CurrentUser() user: JwtUser) {
@@ -61,9 +65,13 @@ export class UsersController {
         trashRetentionDays: true,
         themePreference: true,
         trashToggles: true,
+        subscriptionTier: true,
+        subscriptionEndsAt: true,
+        planChosenAt: true,
       },
     });
-    return { ...row, trashRetentionDays: row.trashRetentionDays ?? 7 };
+    const dashboard = await this.subscription.mergeDashboardState(user.userId);
+    return { ...row, trashRetentionDays: row.trashRetentionDays ?? 7, subscription: dashboard };
   }
 
   @Patch('me')

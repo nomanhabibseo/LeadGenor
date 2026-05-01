@@ -6,6 +6,8 @@ import Link from "next/link";
 import { Bell, ChevronDown, User } from "lucide-react";
 import { useEffect, useState } from "react";
 import { apiFetch, apiUrl } from "@/lib/api";
+import { useDashboardPlansModal } from "@/contexts/dashboard-plans-modal-context";
+import type { UsersMePayload } from "@/lib/user-subscription";
 import { cn } from "@/lib/utils";
 import { flushQueuedNotifications } from "@/lib/notifications";
 import { sessionQueryUserKey } from "@/lib/session-query-scope";
@@ -18,6 +20,7 @@ function firstWordCapital(name: string) {
 
 export function HeaderAccount({ tone = "dark" }: { tone?: "dark" | "light" }) {
   const { data: session } = useSession();
+  const { open: openPlansModal } = useDashboardPlansModal();
   const token = session?.accessToken;
   const userKey = sessionQueryUserKey(session);
   const qc = useQueryClient();
@@ -30,9 +33,13 @@ export function HeaderAccount({ tone = "dark" }: { tone?: "dark" | "light" }) {
 
   const { data: me } = useQuery({
     queryKey: ["users", "me", token],
-    queryFn: () => apiFetch<{ id: string; email: string; name: string | null }>("/users/me", token),
+    queryFn: () => apiFetch<UsersMePayload>("/users/me", token),
     enabled: !!token,
   });
+
+  const eff = me?.subscription?.effectiveTier;
+  const tier =
+    eff === "PRO" ? "Pro" : eff === "BUSINESS" ? "Business" : "Free";
 
   const { data: unread } = useQuery({
     queryKey: ["notifications-unread", userKey],
@@ -128,6 +135,51 @@ export function HeaderAccount({ tone = "dark" }: { tone?: "dark" | "light" }) {
           <>
             <button type="button" className="fixed inset-0 z-40 cursor-default" aria-label="Close menu" onClick={() => setOpen(false)} />
             <div className="absolute right-0 top-full z-50 mt-2 w-[min(100vw-2rem,20rem)] rounded-xl border border-slate-200 bg-white p-4 text-sm shadow-xl dark:border-slate-600 dark:bg-slate-800">
+              <div className="mb-4 rounded-lg border border-slate-200 bg-slate-50 p-3 dark:border-slate-600 dark:bg-slate-900/50">
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                  Current plan
+                </p>
+                <p className="mt-1 text-lg font-bold text-slate-900 dark:text-white">{tier}</p>
+                <div className="mt-2 border-t border-slate-200 pt-2 dark:border-slate-700">
+                  {eff === "FREE" ? (
+                    <button
+                      type="button"
+                      className="text-left text-xs font-semibold text-violet-700 underline decoration-violet-400/80 underline-offset-2 hover:text-violet-900 dark:text-violet-300 dark:hover:text-violet-200"
+                      onClick={() => {
+                        openPlansModal();
+                        setOpen(false);
+                      }}
+                    >
+                      Upgrade to Pro
+                    </button>
+                  ) : null}
+                  {eff === "PRO" ? (
+                    <button
+                      type="button"
+                      className="text-left text-xs font-semibold text-violet-700 underline decoration-violet-400/80 underline-offset-2 hover:text-violet-900 dark:text-violet-300 dark:hover:text-violet-200"
+                      onClick={() => {
+                        openPlansModal();
+                        setOpen(false);
+                      }}
+                    >
+                      Upgrade to Business
+                    </button>
+                  ) : null}
+                  {eff === "BUSINESS" ? (
+                    <button
+                      type="button"
+                      className="text-left text-xs font-semibold text-violet-700 underline decoration-violet-400/80 underline-offset-2 hover:text-violet-900 dark:text-violet-300 dark:hover:text-violet-200"
+                      onClick={() => {
+                        openPlansModal();
+                        setOpen(false);
+                      }}
+                    >
+                      See all plans
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+
               <label className="block">
                 <span className="text-xs font-medium text-slate-600 dark:text-slate-300">Display name</span>
                 <input

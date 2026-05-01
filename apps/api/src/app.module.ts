@@ -18,10 +18,14 @@ import { HealthModule } from './health/health.module';
 import { EmailMarketingModule } from './email-marketing/email-marketing.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { EmailFinderModule } from './email-finder/email-finder.module';
+import { SubscriptionModule } from './subscription/subscription.module';
+import { AdminModule } from './admin/admin.module';
 
 @Module({
   imports: [
     HealthModule,
+    AdminModule,
+    SubscriptionModule,
     EmailMarketingModule,
     EmailFinderModule,
     ConfigModule.forRoot({

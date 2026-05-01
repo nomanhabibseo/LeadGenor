@@ -5,6 +5,7 @@ import { SessionProvider } from "next-auth/react";
 import { useState } from "react";
 import { AppDialogProvider } from "@/contexts/app-dialog-context";
 import { ThemeProvider } from "@/components/theme-provider";
+import { SmoothHashScrollEffects } from "@/components/smooth-hash-scroll-effects";
 
 export function Providers({ children }: { children: React.ReactNode }) {
   const [client] = useState(
@@ -24,6 +25,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
     <SessionProvider refetchOnWindowFocus>
       <QueryClientProvider client={client}>
         <ThemeProvider>
+          <SmoothHashScrollEffects />
           <AppDialogProvider>{children}</AppDialogProvider>
         </ThemeProvider>
       </QueryClientProvider>

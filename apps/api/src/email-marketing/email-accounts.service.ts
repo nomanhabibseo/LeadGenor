@@ -8,6 +8,7 @@ import { EmailAccount, EmailAccountProvider, Prisma, SmtpEncryption } from '@pri
 import { randomBytes } from 'crypto';
 import * as nodemailer from 'nodemailer';
 import { PrismaService } from '../prisma/prisma.service';
+import { SubscriptionService } from '../subscription/subscription.service';
 import { decryptSecret, encryptSecret } from './crypto-secret';
 import { EmailImapSyncService } from './email-imap-sync.service';
 
@@ -20,6 +21,7 @@ export class EmailAccountsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly imapSync: EmailImapSyncService,
+    private readonly subscription: SubscriptionService,
   ) {}
 
   /** True when mailbox sync API can run for this row (OAuth or SMTP+IMAP). */
@@ -119,6 +121,8 @@ export class EmailAccountsService {
     if (!tag) throw new BadRequestException('Tag is required.');
     const displayTrim = dto.displayName.trim();
     if (!displayTrim) throw new BadRequestException('Display name is required.');
+    await this.subscription.assertEmailAccountSlot(userId);
+
     const dupName = await this.prisma.emailAccount.findFirst({
       where: {
         userId,
@@ -200,6 +204,7 @@ export class EmailAccountsService {
       displayName: string;
     },
   ) {
+    await this.subscription.assertEmailAccountSlot(userId);
     const tag = this.newOAuthTag(data.provider === EmailAccountProvider.GMAIL_API ? 'g' : 'ms');
     try {
       return await this.prisma.emailAccount.create({

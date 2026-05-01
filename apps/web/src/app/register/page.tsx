@@ -5,6 +5,8 @@ import { signIn } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { BrandMark } from "@/components/brand-mark";
+import { MarketingFooter } from "@/components/marketing-footer";
+import { MarketingHeader } from "@/components/marketing-header";
 import { PasswordField } from "@/components/password-field";
 import { apiUrl } from "@/lib/api";
 
@@ -32,7 +34,7 @@ export default function RegisterPage() {
       });
     } catch {
       setError(
-        "Cannot reach the API. Start it with: npm run dev (from project root) so port 4000 is up. Check NEXT_PUBLIC_API_URL in apps/web/.env.local.",
+        "Cannot reach the API—run `npm run dev` from the project root (web + Nest on port 4000). On another device/LAN URL, Next proxies to localhost; restart the web dev server after env changes.",
       );
       return;
     }
@@ -63,18 +65,22 @@ export default function RegisterPage() {
       return;
     }
     if (sign?.ok) {
-      router.push("/dashboard");
+      router.push("/pricing");
       router.refresh();
     }
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-slate-950 px-4 dark:bg-black">
+    <div className="flex min-h-screen flex-col bg-slate-950 dark:bg-black">
       <div className="pointer-events-none fixed inset-0 bg-hero-mesh opacity-60 dark:opacity-40" aria-hidden />
+      <MarketingHeader />
+      <div className="relative z-10 flex flex-1 items-center justify-center px-4 py-10 pb-16">
       <div className="relative w-full max-w-md rounded-2xl border border-white/10 bg-white/95 p-8 shadow-2xl backdrop-blur dark:border-slate-700/80 dark:bg-slate-800/95">
-        <Link href="/" className="mb-8 flex justify-center">
-          <BrandMark variant="auth" priority />
-        </Link>
+        <div className="mb-6 flex justify-center">
+          <Link href="/" className="inline-flex shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-slate-800 rounded-lg">
+            <BrandMark variant="auth" priority className="max-w-[min(100%,280px)]" />
+          </Link>
+        </div>
         <h1 className="text-center text-2xl font-bold text-slate-900 dark:text-slate-100">Create your account</h1>
         <p className="mt-1 text-center text-sm text-slate-500 dark:text-slate-400">Start managing vendors and orders</p>
         <form onSubmit={onSubmit} className="mt-8 space-y-5">
@@ -123,6 +129,8 @@ export default function RegisterPage() {
           </Link>
         </p>
       </div>
+      </div>
+      <MarketingFooter />
     </div>
   );
 }
