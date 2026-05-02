@@ -37,7 +37,8 @@ async function bootstrap() {
     },
     credentials: true,
   });
-  const port = process.env.PORT ?? 4000;
-  await app.listen(port);
+  const port = Number.parseInt(process.env.PORT ?? '4000', 10) || 4000;
+  /** Render / Docker: must listen on all interfaces, not only loopback. */
+  await app.listen(port, '0.0.0.0');
 }
 bootstrap();
