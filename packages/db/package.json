@@ -5,7 +5,7 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "scripts": {
-    "postinstall": "prisma generate",
+    "postinstall": "node scripts/prisma-postinstall.cjs",
     "build": "tsc",
     "generate": "prisma generate",
     "migrate:dev": "prisma migrate dev",
