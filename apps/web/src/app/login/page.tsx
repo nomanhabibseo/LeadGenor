@@ -2,7 +2,6 @@
 
 import Link from "next/link";
 import { getSession, signIn } from "next-auth/react";
-import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { BrandMark } from "@/components/brand-mark";
 import { MarketingFooter } from "@/components/marketing-footer";
@@ -72,8 +71,7 @@ export default function LoginPage() {
           if (mr.ok) {
             const j = (await mr.json()) as UsersMePayload;
             if (!j.planChosenAt) {
-              router.push("/pricing");
-              router.refresh();
+              window.location.assign("/pricing");
               return;
             }
           }
@@ -81,8 +79,8 @@ export default function LoginPage() {
       } catch {
         /* fall through */
       }
-      router.push("/dashboard");
-      router.refresh();
+      // Full navigation so middleware reliably sees session cookies (SPA-only nav can race RSC).
+      window.location.assign("/dashboard");
     }
   }
 

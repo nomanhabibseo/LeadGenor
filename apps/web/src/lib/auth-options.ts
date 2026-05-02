@@ -11,6 +11,8 @@ function apiBaseUrl() {
 }
 
 export const authOptions: NextAuthOptions = {
+  /** Vercel / Cloudflare: forwarded host/proto may not match NEXTAUTH_URL byte-for-byte. */
+  trustHost: true,
   providers: [
     CredentialsProvider({
       name: "Credentials",

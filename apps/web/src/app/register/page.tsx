@@ -2,7 +2,6 @@
 
 import Link from "next/link";
 import { signIn } from "next-auth/react";
-import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { BrandMark } from "@/components/brand-mark";
 import { MarketingFooter } from "@/components/marketing-footer";
@@ -11,7 +10,6 @@ import { PasswordField } from "@/components/password-field";
 import { apiUrl } from "@/lib/api";
 
 export default function RegisterPage() {
-  const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");
@@ -65,8 +63,7 @@ export default function RegisterPage() {
       return;
     }
     if (sign?.ok) {
-      router.push("/pricing");
-      router.refresh();
+      window.location.assign("/pricing");
     }
   }
 
