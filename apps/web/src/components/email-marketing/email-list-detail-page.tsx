@@ -3,16 +3,26 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { useSession } from "next-auth/react";
-import { useMemo, useRef, useState } from "react";
-import { ChevronDown, Download, ExternalLink, Upload } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { ChevronDown, Download, ExternalLink, Loader2, Upload, X } from "lucide-react";
 import { useAppDialog } from "@/contexts/app-dialog-context";
+import { ImportQuitOverlay } from "@/components/sheet-import-quit-overlay";
+import { SheetPreviewPanel } from "@/components/sheet-preview-panel";
 import { apiFetch, apiFetchBlob } from "@/lib/api";
+import { SkippedDuplicateUrlsPanel } from "@/components/skipped-duplicate-urls-panel";
+import {
+  extractSkippedExistingUrls,
+  formatImportExportResultLines,
+} from "@/lib/post-import-export";
+import { postImportNdjsonStream } from "@/lib/post-import-ndjson-stream";
+import { useSheetPreview } from "@/hooks/use-sheet-preview";
 import { sessionQueryUserKey } from "@/lib/session-query-scope";
 import { DrTableMeter, NicheTablePill } from "@/components/table-status-badges";
 import { DataTableRowMenu, type RowMenuItem } from "@/components/data-table-row-menu";
 import { TrafficSparkline } from "@/components/traffic-sparkline";
 import { countryShortLabel, nicheFirstWord } from "@/lib/vendor-table-display";
 import { findEmailsFromUrl, findEmailsFromUrls } from "@/lib/email-finder";
+import { SHEET_IMPORT_BUSY_HINT, SHEET_IMPORT_BUTTON_LABEL } from "@/lib/sheet-import-busy-message";
 
 type Item = {
   id: string;
@@ -49,7 +59,7 @@ export function EmailListDetailPage({ listId }: { listId: string }) {
   const token = session?.accessToken;
   const userKey = sessionQueryUserKey(session);
   const qc = useQueryClient();
-  const { showConfirm } = useAppDialog();
+  const { showConfirm, showAlert } = useAppDialog();
   const [sel, setSel] = useState<Set<string>>(new Set());
   const [view, setView] = useState<Item | null>(null);
   const [importKind, setImportKind] = useState<"menu" | "csv" | "sheet" | "bank" | null>(null);
@@ -58,17 +68,45 @@ export function EmailListDetailPage({ listId }: { listId: string }) {
   const [bankTab, setBankTab] = useState<"vendors" | "clients">("vendors");
   const [bankSel, setBankSel] = useState<Set<string>>(new Set());
   const undoBannerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const csvFileInputRef = useRef<HTMLInputElement>(null);
   const [undoSnapshot, setUndoSnapshot] = useState<Item[] | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [findingIds, setFindingIds] = useState<Set<string>>(new Set());
   const [findStatus, setFindStatus] = useState<Record<string, "not_found" | "found">>({});
   const [bulkFinding, setBulkFinding] = useState(false);
+  const [listImportSkippedUrls, setListImportSkippedUrls] = useState<string[]>([]);
+  const [csvFileLabel, setCsvFileLabel] = useState<string | null>(null);
+  const listImportAbortRef = useRef<AbortController | null>(null);
+  const [importQuitOpen, setImportQuitOpen] = useState(false);
+  const [listImportProgress, setListImportProgress] = useState<string | null>(null);
+
+  function resetCsvImportPickers() {
+    setCsvText("");
+    setCsvFileLabel(null);
+    if (csvFileInputRef.current) csvFileInputRef.current.value = "";
+  }
+
+  const sheetPreview = useSheetPreview(sheetUrl, token, importKind === "sheet");
+
+  useEffect(() => {
+    if (importKind == null) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, [importKind]);
+
+  useEffect(() => {
+    if (importKind == null) setImportQuitOpen(false);
+  }, [importKind]);
 
   const { data: list } = useQuery({
     queryKey: ["email-list", userKey, listId],
     queryFn: () => apiFetch<{ id: string; name: string }>(`/email-marketing/lists/${listId}`, token),
     enabled: status === "authenticated" && !!token && !!userKey,
+    staleTime: 60_000,
   });
 
   const { data: itemsPage, isLoading } = useQuery({
@@ -76,6 +114,7 @@ export function EmailListDetailPage({ listId }: { listId: string }) {
     queryFn: () =>
       apiFetch<{ items: Item[]; total: number }>(`/email-marketing/lists/${listId}/items?limit=200`, token),
     enabled: status === "authenticated" && !!token && !!userKey,
+    staleTime: 60_000,
   });
 
   const vendorsQ = useQuery({
@@ -86,39 +125,139 @@ export function EmailListDetailPage({ listId }: { listId: string }) {
         token,
       ),
     enabled: status === "authenticated" && !!token && !!userKey && importKind === "bank" && bankTab === "vendors",
+    staleTime: 60_000,
   });
 
   const clientsQ = useQuery({
     queryKey: ["clients-import", userKey],
     queryFn: () => apiFetch<{ data: ClientRow[]; total: number }>("/clients?limit=200", token),
     enabled: status === "authenticated" && !!token && !!userKey && importKind === "bank" && bankTab === "clients",
+    staleTime: 60_000,
   });
 
   const importCsv = useMutation({
-    mutationFn: () =>
-      apiFetch(`/email-marketing/lists/${listId}/import/csv`, token, {
-        method: "POST",
-        body: JSON.stringify({ csv: csvText }),
-      }),
-    onSuccess: () => {
+    onMutate: () => setListImportProgress(null),
+    mutationFn: async () => {
+      listImportAbortRef.current = new AbortController();
+      const signal = listImportAbortRef.current.signal;
+      const r = await postImportNdjsonStream(
+        `/email-marketing/lists/${listId}/import/csv/stream`,
+        token,
+        { csv: csvText },
+        {
+          signal,
+          onProgress: ({ imported, total }) => {
+            setListImportProgress(
+              total != null && total > 0 ? `Imported ${imported} / ${total}` : `Imported ${imported}`,
+            );
+          },
+        },
+      );
+      if (!r.ok) {
+        if (r.cancelled) return { kind: "cancelled" as const };
+        throw new Error(r.message);
+      }
+      return { kind: "ok" as const, data: r.data };
+    },
+    onSuccess: (res) => {
+      if (res.kind === "cancelled") {
+        void qc.invalidateQueries({ queryKey: ["email-list-items", userKey, listId] });
+        return;
+      }
+      const data = res.data;
+      setListImportSkippedUrls(extractSkippedExistingUrls(data));
+      void showAlert(formatImportExportResultLines(data));
       void qc.invalidateQueries({ queryKey: ["email-list-items", userKey, listId] });
       setImportKind(null);
-      setCsvText("");
+      resetCsvImportPickers();
+    },
+    onError: (e) => void showAlert(e instanceof Error ? e.message : "Import failed."),
+    onSettled: () => {
+      listImportAbortRef.current = null;
+      setListImportProgress(null);
     },
   });
 
   const importSheet = useMutation({
-    mutationFn: () =>
-      apiFetch(`/email-marketing/lists/${listId}/import/sheet`, token, {
-        method: "POST",
-        body: JSON.stringify({ url: sheetUrl }),
-      }),
-    onSuccess: () => {
+    onMutate: () => setListImportProgress(null),
+    mutationFn: async () => {
+      listImportAbortRef.current = new AbortController();
+      const signal = listImportAbortRef.current.signal;
+      const r = await postImportNdjsonStream(
+        `/email-marketing/lists/${listId}/import/sheet/stream`,
+        token,
+        { url: sheetUrl.trim() },
+        {
+          signal,
+          onProgress: ({ imported, total }) => {
+            setListImportProgress(
+              total != null && total > 0 ? `Imported ${imported} / ${total}` : `Imported ${imported}`,
+            );
+          },
+        },
+      );
+      if (!r.ok) {
+        if (r.cancelled) return { kind: "cancelled" as const };
+        throw new Error(r.message);
+      }
+      return { kind: "ok" as const, data: r.data };
+    },
+    onSuccess: (res) => {
+      if (res.kind === "cancelled") {
+        void qc.invalidateQueries({ queryKey: ["email-list-items", userKey, listId] });
+        return;
+      }
+      const data = res.data;
+      setListImportSkippedUrls(extractSkippedExistingUrls(data));
+      void showAlert(formatImportExportResultLines(data));
       void qc.invalidateQueries({ queryKey: ["email-list-items", userKey, listId] });
       setImportKind(null);
       setSheetUrl("");
     },
+    onError: (e) => void showAlert(e instanceof Error ? e.message : "Import failed."),
+    onSettled: () => {
+      listImportAbortRef.current = null;
+      setListImportProgress(null);
+    },
   });
+
+  function finishImportQuitAbortAndClose() {
+    listImportAbortRef.current?.abort();
+    setImportQuitOpen(false);
+    resetCsvImportPickers();
+    setSheetUrl("");
+    setImportKind(null);
+  }
+
+  function requestCloseWhileImportCsvOrSheet() {
+    if (importCsv.isPending || importSheet.isPending) setImportQuitOpen(true);
+    else {
+      resetCsvImportPickers();
+      setSheetUrl("");
+      setImportKind(null);
+    }
+  }
+
+  function requestCsvBackOrSwitchAway() {
+    if (importCsv.isPending) setImportQuitOpen(true);
+    else {
+      resetCsvImportPickers();
+      setImportKind(null);
+    }
+  }
+
+  function requestSheetBackToMenu() {
+    if (importSheet.isPending) setImportQuitOpen(true);
+    else setImportKind("menu");
+  }
+
+  function requestSwitchCsvToSheetTab() {
+    if (importCsv.isPending) setImportQuitOpen(true);
+    else {
+      resetCsvImportPickers();
+      setImportKind("sheet");
+    }
+  }
 
   const importVendors = useMutation({
     mutationFn: (ids: string[]) =>
@@ -156,7 +295,14 @@ export function EmailListDetailPage({ listId }: { listId: string }) {
   });
 
   const items = itemsPage?.items ?? [];
-  const emailsStr = (em: unknown) => (Array.isArray(em) ? (em as string[]).join(", ") : "");
+  /** Normalized list of email strings for an item (handles array or comma-separated string). */
+  function listEmailsFromPayload(emails: unknown): string[] {
+    if (Array.isArray(emails))
+      return (emails as unknown[]).map((s) => String(s).trim()).filter(Boolean);
+    if (typeof emails === "string") return emails.split(/[,;\n]+/).map((s) => s.trim()).filter(Boolean);
+    return [];
+  }
+  const emailsStr = (em: unknown) => listEmailsFromPayload(em).join(", ");
   const total = itemsPage?.total ?? items.length;
   const filteredItems = (() => {
     const q = search.trim().toLowerCase();
@@ -168,8 +314,7 @@ export function EmailListDetailPage({ listId }: { listId: string }) {
   })();
 
   const itemsMissingEmail = useMemo(
-    () => filteredItems.filter((it) => !emailsStr(it.emails).trim()),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- computed from filteredItems + helper
+    () => filteredItems.filter((it) => listEmailsFromPayload(it.emails).length === 0),
     [filteredItems],
   );
 
@@ -269,7 +414,7 @@ export function EmailListDetailPage({ listId }: { listId: string }) {
     setSel(new Set());
     setUndoSnapshot(snap);
     if (undoBannerTimerRef.current) clearTimeout(undoBannerTimerRef.current);
-    undoBannerTimerRef.current = setTimeout(() => setUndoSnapshot(null), 25000);
+    undoBannerTimerRef.current = setTimeout(() => setUndoSnapshot(null), 5000);
   }
 
   async function undoListRemove() {
@@ -304,7 +449,14 @@ export function EmailListDetailPage({ listId }: { listId: string }) {
           <h1 className="text-2xl font-bold text-slate-900 dark:text-white">{list?.name ?? "…"}</h1>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <button type="button" className="btn-toolbar-outline" onClick={() => setImportKind("menu")}>
+          <button
+            type="button"
+            className="btn-toolbar-outline"
+            onClick={() => {
+              setListImportSkippedUrls([]);
+              setImportKind("menu");
+            }}
+          >
             <Upload className="h-4 w-4 text-brand-600 dark:text-cyan-400" />
             Import
           </button>
@@ -350,6 +502,15 @@ export function EmailListDetailPage({ listId }: { listId: string }) {
           ) : null}
         </div>
       </div>
+
+      {listImportSkippedUrls.length > 0 ? (
+        <SkippedDuplicateUrlsPanel
+          urls={listImportSkippedUrls}
+          headline={`${listImportSkippedUrls.length} URL(s) already on this list — rows updated from your file`}
+          description="These sites were already on this list before you imported; we refreshed them with the latest row data from your file."
+          onDismiss={() => setListImportSkippedUrls([])}
+        />
+      ) : null}
 
       {items.length > 0 ? (
         <div className="space-y-2">
@@ -416,7 +577,6 @@ export function EmailListDetailPage({ listId }: { listId: string }) {
                 </th>
                 <th className="w-10 p-2.5">#</th>
                 <th className="min-w-[10rem] p-2.5">Site URL</th>
-                <th className="p-2.5">Company name</th>
                 <th className="p-2.5">Niche</th>
                 <th className="p-2.5">Country</th>
                 <th className="p-2.5">Traffic</th>
@@ -473,9 +633,6 @@ export function EmailListDetailPage({ listId }: { listId: string }) {
                       </a>
                     </div>
                   </td>
-                  <td className="data-table-td max-w-[10rem] truncate" title={it.companyName}>
-                    {it.companyName}
-                  </td>
                   <td className="data-table-td max-w-[8rem]" title={it.niche || ""}>
                     <NicheTablePill text={nicheFirstWord(it.niche?.split(/[;]/)[0])} />
                   </td>
@@ -492,23 +649,35 @@ export function EmailListDetailPage({ listId }: { listId: string }) {
                     <DrTableMeter dr={it.dr} />
                   </td>
                   <td className="data-table-td whitespace-nowrap">
-                    {emailsStr(it.emails).trim() ? (
-                      <span className="text-slate-400">—</span>
-                    ) : findingIds.has(it.id) ? (
-                      <span className="text-slate-500">Finding…</span>
-                    ) : findStatus[it.id] === "not_found" ? (
-                      <span className="inline-flex items-center justify-center rounded-md bg-red-600 px-2 py-1 text-[10px] font-bold uppercase tracking-wide text-white dark:bg-white dark:text-red-700">
-                        Not found
-                      </span>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={() => void findOne(it)}
-                        className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900/60 dark:text-slate-200 dark:hover:bg-slate-800"
-                      >
-                        Find email
-                      </button>
-                    )}
+                    {(() => {
+                      const emailCount = listEmailsFromPayload(it.emails).length;
+                      if (emailCount > 0) {
+                        return (
+                          <span className="tabular-nums font-semibold text-slate-800 dark:text-slate-100">
+                            {emailCount}
+                          </span>
+                        );
+                      }
+                      if (findingIds.has(it.id)) {
+                        return <span className="text-slate-500">Finding…</span>;
+                      }
+                      if (findStatus[it.id] === "not_found") {
+                        return (
+                          <span className="text-[11px] font-medium text-red-600 dark:text-red-400">
+                            not found
+                          </span>
+                        );
+                      }
+                      return (
+                        <button
+                          type="button"
+                          onClick={() => void findOne(it)}
+                          className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900/60 dark:text-slate-200 dark:hover:bg-slate-800"
+                        >
+                          Find email
+                        </button>
+                      );
+                    })()}
                   </td>
                   <td className="data-table-td whitespace-nowrap">
                     <DataTableRowMenu
@@ -550,24 +719,103 @@ export function EmailListDetailPage({ listId }: { listId: string }) {
 
       {importKind === "csv" ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-          <div className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-2xl bg-white p-6 dark:bg-slate-800">
-            <h2 className="text-lg font-semibold">Import CSV</h2>
-            <p className="mt-2 text-xs text-slate-500">Paste CSV with headers (site_url, company_name, emails, …).</p>
-            <textarea
-              className="mt-3 h-48 w-full rounded-lg border border-slate-200 p-2 font-mono text-xs dark:border-slate-600 dark:bg-slate-800"
-              value={csvText}
-              onChange={(e) => setCsvText(e.target.value)}
+          <div className="relative max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-2xl bg-white p-6 dark:bg-slate-800">
+            <ImportQuitOverlay
+              open={importQuitOpen}
+              onQuitOk={finishImportQuitAbortAndClose}
+              onBackToTab={() => setImportQuitOpen(false)}
             />
-            <div className="mt-4 flex justify-between gap-2">
-              <button type="button" className="text-sm text-cyan-600" onClick={() => setImportKind("sheet")}>
-                Use Google Sheet link instead
+            <h2 className="text-lg font-semibold">Import CSV</h2>
+            <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+              Choose a CSV file with headers (<span className="font-mono">site_url</span>, company_name, emails, …).
+            </p>
+            <input
+              ref={csvFileInputRef}
+              type="file"
+              accept=".csv,text/csv,text/plain"
+              className="sr-only"
+              aria-hidden
+              disabled={importCsv.isPending}
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (!file) return;
+                setCsvFileLabel(file.name);
+                const reader = new FileReader();
+                reader.onload = () => setCsvText(typeof reader.result === "string" ? reader.result : "");
+                reader.readAsText(file);
+              }}
+            />
+            <div className="mt-4 flex flex-col gap-3">
+              <button
+                type="button"
+                disabled={importCsv.isPending}
+                onClick={() => csvFileInputRef.current?.click()}
+                className="inline-flex w-full items-center justify-center rounded-lg border border-slate-300 bg-white py-2.5 text-sm font-semibold text-slate-900 shadow-sm transition hover:bg-slate-50 disabled:opacity-50 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 dark:hover:bg-slate-700/80"
+              >
+                Choose CSV file…
               </button>
-              <div className="flex gap-2">
-                <button type="button" onClick={() => setImportKind(null)}>
-                  Cancel
+              {csvFileLabel ? (
+                <p className="text-center text-xs text-slate-600 dark:text-slate-400">
+                  Selected: <span className="font-mono font-medium">{csvFileLabel}</span>
+                </p>
+              ) : null}
+
+              <details className="rounded-lg border border-slate-200 dark:border-slate-600">
+                <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-slate-600 hover:bg-slate-50 dark:text-slate-400 dark:hover:bg-slate-800/60">
+                  Or paste CSV as text instead
+                </summary>
+                <textarea
+                  className="mx-3 mb-3 h-40 w-[calc(100%-1.5rem)] rounded-lg border border-slate-200 p-2 font-mono text-xs dark:border-slate-600 dark:bg-slate-900/40"
+                  value={csvText}
+                  placeholder="Paste rows here..."
+                  disabled={importCsv.isPending}
+                  onChange={(e) => {
+                    setCsvText(e.target.value);
+                    setCsvFileLabel(null);
+                    if (csvFileInputRef.current) csvFileInputRef.current.value = "";
+                  }}
+                />
+              </details>
+            </div>
+            {importCsv.isPending && listImportProgress ? (
+              <p className="mt-3 text-xs font-medium text-slate-800 dark:text-slate-100">{listImportProgress}</p>
+            ) : null}
+            <div className="mt-4 flex justify-between gap-2">
+              {!importCsv.isPending ? (
+                <button type="button" className="text-sm text-cyan-600" onClick={() => void requestSwitchCsvToSheetTab()}>
+                  Use Google Sheet link instead
                 </button>
-                <button type="button" className="btn-save-primary-sm" onClick={() => void importCsv.mutate()}>
-                  Import
+              ) : (
+                <span />
+              )}
+              <div className="flex gap-2">
+                {importCsv.isPending ? (
+                  <button
+                    type="button"
+                    className="text-sm font-medium text-red-600 hover:underline dark:text-red-400"
+                    onClick={() => listImportAbortRef.current?.abort()}
+                  >
+                    Cancel import
+                  </button>
+                ) : (
+                  <button type="button" onClick={() => void requestCsvBackOrSwitchAway()}>
+                    Cancel
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="btn-save-primary-sm"
+                  disabled={importCsv.isPending || !csvText.trim()}
+                  onClick={() => void importCsv.mutate()}
+                >
+                  {importCsv.isPending ? (
+                    <span className="inline-flex items-center gap-1.5">
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                      Importing…
+                    </span>
+                  ) : (
+                    "Import"
+                  )}
                 </button>
               </div>
             </div>
@@ -576,22 +824,76 @@ export function EmailListDetailPage({ listId }: { listId: string }) {
       ) : null}
 
       {importKind === "sheet" ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-          <div className="w-full max-w-md rounded-2xl bg-white p-6 dark:bg-slate-800">
-            <h2 className="text-lg font-semibold">Google Sheet</h2>
-            <input
-              className="mt-3 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-800"
-              placeholder="https://docs.google.com/spreadsheets/d/..."
-              value={sheetUrl}
-              onChange={(e) => setSheetUrl(e.target.value)}
+        <div className="fixed inset-0 z-50 flex items-center justify-center overflow-hidden bg-black/40 p-4">
+          <div className="relative flex max-h-[min(88vh,calc(100dvh-2rem))] w-full max-w-lg flex-col overflow-hidden rounded-2xl bg-white shadow-xl dark:bg-slate-800">
+            <ImportQuitOverlay
+              open={importQuitOpen}
+              onQuitOk={finishImportQuitAbortAndClose}
+              onBackToTab={() => setImportQuitOpen(false)}
             />
-            <div className="mt-4 flex justify-end gap-2">
-              <button type="button" onClick={() => setImportKind("menu")}>
-                Back
+            <div className="flex shrink-0 items-start justify-between gap-2 border-b border-slate-100 px-5 pb-3 pt-4 dark:border-slate-700">
+              <h2 className="text-lg font-semibold">Google Sheet</h2>
+              <button
+                type="button"
+                className="shrink-0 rounded-lg p-1.5 text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
+                aria-label="Close"
+                onClick={() => void requestCloseWhileImportCsvOrSheet()}
+              >
+                <X className="h-4 w-4" />
               </button>
-              <button type="button" className="btn-save-primary-sm" onClick={() => void importSheet.mutate()}>
-                Import
-              </button>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 py-4">
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                Share as &quot;Anyone with the link&quot; (viewer). Headers appear below automatically.
+              </p>
+              <input
+                className="mt-3 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-800"
+                placeholder="https://docs.google.com/spreadsheets/d/..."
+                value={sheetUrl}
+                disabled={importSheet.isPending}
+                onChange={(e) => setSheetUrl(e.target.value)}
+              />
+              <SheetPreviewPanel
+                loading={sheetPreview.loading}
+                error={sheetPreview.error}
+                data={sheetPreview.data}
+              />
+              {importSheet.isPending && listImportProgress ? (
+                <p className="mt-3 text-xs font-medium text-slate-800 dark:text-slate-100">{listImportProgress}</p>
+              ) : null}
+              <div className="mt-4 flex flex-wrap justify-end gap-2">
+                {importSheet.isPending ? (
+                  <button
+                    type="button"
+                    className="text-sm font-medium text-red-600 hover:underline dark:text-red-400"
+                    onClick={() => listImportAbortRef.current?.abort()}
+                  >
+                    Cancel import
+                  </button>
+                ) : (
+                  <button type="button" className="text-sm text-slate-700 dark:text-slate-200" onClick={() => void requestSheetBackToMenu()}>
+                    Back
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="btn-save-primary-sm"
+                  disabled={importSheet.isPending || !sheetUrl.trim()}
+                  onClick={() => void importSheet.mutate()}
+                >
+                  {importSheet.isPending ? (
+                    <span className="inline-flex items-center gap-1.5">
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                      {SHEET_IMPORT_BUTTON_LABEL}
+                    </span>
+                  ) : (
+                    "Import"
+                  )}
+                </button>
+              </div>
+              {importSheet.isPending ? (
+                <p className="mt-3 text-[11px] leading-relaxed text-slate-600 dark:text-slate-400">{SHEET_IMPORT_BUSY_HINT}</p>
+              ) : null}
             </div>
           </div>
         </div>

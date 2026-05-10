@@ -14,7 +14,8 @@ function serverAbsoluteBase(): string {
  * the app as http://LAN_IP:3000 — direct `NEXT_PUBLIC_API_URL=http://localhost:4000` would hit the wrong host.
  * Set `NEXT_PUBLIC_DEV_USE_DIRECT_API=1` only if you intentionally want the browser to call the absolute API URL.
  */
-function browserUsesDevProxy(): boolean {
+/** Exported for import helpers that need to hint when the Next.js dev proxy may time out before Nest responds. */
+export function browserUsesDevProxy(): boolean {
   if (typeof window === "undefined") return false;
   if (process.env.NODE_ENV !== "development") return false;
   const forceDirect =
@@ -31,6 +32,34 @@ export function apiUrl(path: string) {
   return `${base}${p}`;
 }
 
+/** Avoid hung UI when Nest is starting, DB pool is stuck, or the dev proxy resets the socket. */
+const DEFAULT_REQUEST_TIMEOUT_MS = 45_000;
+
+function mergedTimeoutSignal(existing: AbortSignal | undefined): AbortSignal {
+  const timeoutSig = AbortSignal.timeout(DEFAULT_REQUEST_TIMEOUT_MS);
+  if (!existing) return timeoutSig;
+  if (existing.aborted) return existing;
+  if (typeof AbortSignal.any === "function") {
+    return AbortSignal.any([existing, timeoutSig]);
+  }
+  const ctrl = new AbortController();
+  const forward = (reason: unknown) => {
+    if (ctrl.signal.aborted) return;
+    try {
+      ctrl.abort(reason as never);
+    } catch {
+      ctrl.abort();
+    }
+  };
+  existing.addEventListener("abort", () => forward(existing.reason), { once: true });
+  timeoutSig.addEventListener(
+    "abort",
+    () => forward(new DOMException("The operation timed out.", "TimeoutError")),
+    { once: true },
+  );
+  return ctrl.signal;
+}
+
 export async function apiFetch<T>(
   path: string,
   token: string | undefined,
@@ -42,7 +71,25 @@ export async function apiFetch<T>(
     headers.set("Content-Type", "application/json");
   }
   if (token) headers.set("Authorization", `Bearer ${token}`);
-  const res = await fetch(apiUrl(path), { ...init, headers });
+  const signal = mergedTimeoutSignal(init?.signal === null ? undefined : init?.signal);
+
+  let res: Response;
+  try {
+    res = await fetch(apiUrl(path), { ...init, headers, signal });
+  } catch (e) {
+    const name =
+      typeof e === "object" &&
+      e !== null &&
+      "name" in e &&
+      typeof (e as { name?: string }).name === "string"
+        ? (e as { name: string }).name
+        : "";
+    const msg =
+      name === "TimeoutError"
+        ? `Request timed out after ${Math.round(DEFAULT_REQUEST_TIMEOUT_MS / 1000)}s (${path}). The API may be busy or restarting.`
+        : `Network error (${path}). Is Nest running (${browserUsesDevProxy() ? `web dev proxy → ${serverAbsoluteBase()}` : serverAbsoluteBase()}) and reachable?`;
+    throw new Error(msg);
+  }
   if (!res.ok) {
     const raw = await res.text();
     let body: { message?: string | string[]; error?: string } | null = null;
@@ -84,10 +131,12 @@ export async function apiFetchBlob(
   const headers = new Headers();
   if (body) headers.set("Content-Type", "application/json");
   if (token) headers.set("Authorization", `Bearer ${token}`);
+  const signal = mergedTimeoutSignal(undefined);
   const res = await fetch(apiUrl(path), {
     method: "POST",
     headers,
     body: body ? JSON.stringify(body) : undefined,
+    signal,
   });
   if (!res.ok) {
     const err = await res.text();

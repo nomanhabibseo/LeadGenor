@@ -12,7 +12,19 @@ import {
 } from '@nestjs/common';
 import { DealStatus, PaymentTerms } from '@prisma/client';
 import { Type } from 'class-transformer';
-import { IsBoolean, IsEnum, IsIn, IsInt, IsNumber, IsOptional, IsString, Max, Min } from 'class-validator';
+import {
+  ArrayMaxSize,
+  IsArray,
+  IsBoolean,
+  IsEnum,
+  IsIn,
+  IsInt,
+  IsNumber,
+  IsOptional,
+  IsString,
+  Max,
+  Min,
+} from 'class-validator';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { CurrentUser, JwtUser } from '../common/decorators/current-user.decorator';
 import { VendorBodyDto } from './dto/vendor-body.dto';
@@ -30,7 +42,7 @@ class ListQuery {
   @IsInt()
   @Min(1)
   @Max(200)
-  limit = 20;
+  limit = 100;
 
   @IsOptional()
   @IsString()
@@ -147,6 +159,20 @@ class ListQuery {
   backlinksMax?: number;
 }
 
+class BulkSoftDeleteDto {
+  @IsArray()
+  @ArrayMaxSize(10000)
+  @IsString({ each: true })
+  ids!: string[];
+}
+
+class BulkPermanentDeleteDto {
+  @IsArray()
+  @ArrayMaxSize(10000)
+  @IsString({ each: true })
+  ids!: string[];
+}
+
 class BulkPriceDto {
   @Type(() => Number)
   @IsNumber()
@@ -218,6 +244,46 @@ export class VendorsController {
     });
   }
 
+  @Get('ids')
+  async listIds(
+    @CurrentUser() user: JwtUser,
+    @Query('scope') scope: VendorListScope = 'all',
+    @Query() q: ListQuery,
+  ) {
+    const nicheIds = q.nicheIds?.split(',').filter(Boolean);
+    const countryIds = q.countryIds?.split(',').filter(Boolean);
+    return this.vendors.listIds(user.userId, scope, {
+      searchUrl: q.searchUrl,
+      dealStatus: q.dealStatus,
+      drMin: q.drMin,
+      drMax: q.drMax,
+      trafficMin: q.trafficMin,
+      trafficMax: q.trafficMax,
+      refMin: q.refMin,
+      refMax: q.refMax,
+      gpPriceMin: q.gpPriceMin,
+      gpPriceMax: q.gpPriceMax,
+      nePriceMin: q.nePriceMin,
+      nePriceMax: q.nePriceMax,
+      dateFrom: q.dateFrom,
+      dateTo: q.dateTo,
+      nicheIds,
+      nicheMode: q.nicheMode,
+      countryIds,
+      countryMode: q.countryMode,
+      languageId: q.languageId,
+      paymentTerms: q.paymentTerms,
+      mozDaMin: q.mozDaMin,
+      mozDaMax: q.mozDaMax,
+      authorityScoreMin: q.authorityScoreMin,
+      authorityScoreMax: q.authorityScoreMax,
+      tatValueMin: q.tatValueMin,
+      tatValueMax: q.tatValueMax,
+      backlinksMin: q.backlinksMin,
+      backlinksMax: q.backlinksMax,
+    });
+  }
+
   @Post()
   create(@CurrentUser() user: JwtUser, @Body() body: VendorBodyDto) {
     return this.vendors.create(user.userId, body);
@@ -231,6 +297,16 @@ export class VendorsController {
   @Post('bulk-price')
   bulkPrice(@CurrentUser() user: JwtUser, @Body() body: BulkPriceDto) {
     return this.vendors.bulkPriceAdjustDealDone(user.userId, body.percent, body.guestPost, body.nicheEdit);
+  }
+
+  @Post('bulk-soft-delete')
+  bulkSoftDelete(@CurrentUser() user: JwtUser, @Body() body: BulkSoftDeleteDto) {
+    return this.vendors.softDeleteMany(user.userId, body.ids);
+  }
+
+  @Post('bulk-permanent-delete')
+  bulkPermanentDelete(@CurrentUser() user: JwtUser, @Body() body: BulkPermanentDeleteDto) {
+    return this.vendors.permanentDeleteMany(user.userId, body.ids);
   }
 
   @Get(':id')

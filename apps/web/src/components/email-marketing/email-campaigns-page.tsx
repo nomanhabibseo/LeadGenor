@@ -25,6 +25,7 @@ import { apiFetch } from "@/lib/api";
 import type { UsersMePayload } from "@/lib/user-subscription";
 import { sessionQueryUserKey } from "@/lib/session-query-scope";
 import { cn } from "@/lib/utils";
+import { ListPageBodyLoading } from "@/components/data-table-loading-empty";
 import { TablePagination } from "@/components/table-pagination";
 
 type Camp = {
@@ -49,27 +50,27 @@ type Camp = {
   engagementStats?: boolean;
 };
 
-const SENDER_CHIPS_MAX = 3;
 const CAMPAIGNS_PAGE_SIZE = 20;
 
+/** ~3 visible chips; remainder scroll inside one box so many senders don't stretch the row. */
 function SenderAccountChips({ names }: { names: string[] }) {
   if (!names.length) {
     return <span className="text-[10px] text-slate-400 dark:text-slate-500">—</span>;
   }
-  const shown = names.slice(0, SENDER_CHIPS_MAX);
-  const more = names.length > SENDER_CHIPS_MAX;
   return (
-    <div className="flex min-w-0 flex-wrap items-center gap-1">
-      {shown.map((n, i) => (
-        <span
-          key={`${n}-${i}`}
-          className="max-w-[6.5rem] truncate rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[10px] font-medium text-slate-700 dark:border-slate-600 dark:bg-slate-800/80 dark:text-slate-200"
-          title={n}
-        >
-          {n}
-        </span>
-      ))}
-      {more ? <span className="shrink-0 text-[11px] font-medium text-slate-500 dark:text-slate-400">…</span> : null}
+    <div
+      className="max-h-[4.125rem] min-w-0 max-w-[9rem] overflow-y-auto overscroll-contain rounded border border-slate-200 bg-slate-50/95 py-1 pe-1 ps-1 dark:border-slate-600 dark:bg-slate-800/90"
+      title={`${names.length} sender mailbox(es)`}
+    >
+      <ul className="flex flex-col gap-1">
+        {names.map((n, i) => (
+          <li key={`${n}-${i}`}>
+            <span className="block max-w-full truncate rounded border border-slate-200/90 bg-white px-1.5 py-px text-[10px] font-medium leading-snug text-slate-700 dark:border-slate-600 dark:bg-slate-900/60 dark:text-slate-200">
+              {n}
+            </span>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
@@ -170,6 +171,8 @@ export function EmailCampaignsPage() {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [listPage, setListPage] = useState(1);
+  /** Only the row whose Pause/Run/Resume was clicked shows a spinner. */
+  const [rowAction, setRowAction] = useState<null | { kind: "pause" | "start"; id: string }>(null);
 
   const { data: meSub } = useQuery({
     queryKey: ["users", "me", token],
@@ -177,10 +180,11 @@ export function EmailCampaignsPage() {
     enabled: status === "authenticated" && !!token,
   });
 
-  const { data: rows = [], isError, error, refetch, isFetching } = useQuery({
+  const { data: campaignsData, isError, error, refetch, isFetching, isPending } = useQuery({
     queryKey: ["campaigns", userKey],
     queryFn: () => apiFetch<Camp[]>("/email-marketing/campaigns", token),
     enabled: status === "authenticated" && !!token && !!userKey,
+    staleTime: 15_000,
     refetchOnWindowFocus: true,
     refetchInterval: (q) => {
       const data = q.state.data as Camp[] | undefined;
@@ -188,6 +192,9 @@ export function EmailCampaignsPage() {
       return false;
     },
   });
+  const rows = campaignsData ?? [];
+
+  const listInitialLoading = !isError && campaignsData === undefined && (isPending || isFetching);
 
   const displayRows = useMemo(() => {
     let list = rows.slice();
@@ -254,6 +261,20 @@ export function EmailCampaignsPage() {
     onSettled: () => void qc.invalidateQueries({ queryKey: ["campaigns", userKey] }),
   });
 
+  const rowBusy = rowAction !== null;
+
+  async function onStartOrResumeCampaign(c: Camp, skipRecipientBuild: boolean) {
+    setRowAction({ kind: "start", id: c.id });
+    try {
+      await start.mutateAsync({
+        id: c.id,
+        skipRecipientBuild,
+      });
+    } finally {
+      setRowAction(null);
+    }
+  }
+
   async function onPause(c: Camp) {
     const ok = await showConfirm(
       [
@@ -264,7 +285,12 @@ export function EmailCampaignsPage() {
       ].join("\n"),
     );
     if (!ok) return;
-    await pause.mutateAsync(c.id);
+    setRowAction({ kind: "pause", id: c.id });
+    try {
+      await pause.mutateAsync(c.id);
+    } finally {
+      setRowAction(null);
+    }
   }
 
   function onEditClick(e: React.MouseEvent, c: Camp) {
@@ -390,13 +416,17 @@ export function EmailCampaignsPage() {
         </div>
       </div>
 
-      <p className="text-xs text-slate-500 dark:text-slate-400">
-        <span className="tabular-nums">
-          {rangeFrom} - {rangeTo} of {listTotal}
-        </span>
-      </p>
+      {!listInitialLoading ? (
+        <p className="text-xs text-slate-500 dark:text-slate-400">
+          <span className="tabular-nums">
+            {rangeFrom} - {rangeTo} of {listTotal}
+          </span>
+        </p>
+      ) : null}
 
-      {displayRows.length === 0 ? (
+      {listInitialLoading ? (
+        <ListPageBodyLoading message="Loading campaigns…" />
+      ) : displayRows.length === 0 ? (
         <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50/50 px-6 py-12 text-center text-sm text-slate-600 dark:border-slate-700 dark:bg-slate-800/30 dark:text-slate-400">
           {rows.length === 0 ? "No campaigns yet. Create your first campaign to get started." : "No campaigns match your filters."}
         </div>
@@ -415,6 +445,8 @@ export function EmailCampaignsPage() {
             const senderNames = c.senderAccountNames ?? [];
             const primaryBtn =
               "inline-flex items-center justify-center gap-1 rounded-md border border-transparent bg-transparent px-2 py-1 text-xs font-semibold shadow-none transition-colors disabled:opacity-50";
+            const pauseSpin = rowAction?.kind === "pause" && rowAction.id === c.id;
+            const startSpin = rowAction?.kind === "start" && rowAction.id === c.id;
             return (
               <li key={c.id} className="flex items-stretch gap-3">
                 <div className="w-10 shrink-0 pt-3 text-center text-sm font-semibold tabular-nums text-slate-500 dark:text-slate-400">
@@ -541,15 +573,10 @@ export function EmailCampaignsPage() {
                             primaryBtn,
                             "text-sky-700 hover:border-sky-500 hover:bg-sky-50/80 dark:text-sky-300 dark:hover:border-sky-500 dark:hover:bg-sky-950/40",
                           )}
-                          disabled={start.isPending}
-                          onClick={() =>
-                            void start.mutateAsync({
-                              id: c.id,
-                              skipRecipientBuild: false,
-                            })
-                          }
+                          disabled={rowBusy}
+                          onClick={() => void onStartOrResumeCampaign(c, false)}
                         >
-                          {start.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+                          {startSpin ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
                           Run Campaign
                         </button>
                       ) : null}
@@ -560,10 +587,10 @@ export function EmailCampaignsPage() {
                             primaryBtn,
                             "text-amber-800 hover:border-amber-500 hover:bg-amber-50/80 dark:text-amber-200 dark:hover:border-amber-500 dark:hover:bg-amber-950/30",
                           )}
-                          disabled={pause.isPending}
+                          disabled={rowBusy}
                           onClick={() => void onPause(c)}
                         >
-                          {pause.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Pause className="h-3.5 w-3.5" />}
+                          {pauseSpin ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Pause className="h-3.5 w-3.5" />}
                           Pause
                         </button>
                       ) : null}
@@ -574,15 +601,10 @@ export function EmailCampaignsPage() {
                             primaryBtn,
                             "text-sky-700 hover:border-sky-500 hover:bg-sky-50/80 dark:text-sky-300 dark:hover:border-sky-500 dark:hover:bg-sky-950/40",
                           )}
-                          disabled={start.isPending}
-                          onClick={() =>
-                            void start.mutateAsync({
-                              id: c.id,
-                              skipRecipientBuild: c._count.recipients > 0,
-                            })
-                          }
+                          disabled={rowBusy}
+                          onClick={() => void onStartOrResumeCampaign(c, c._count.recipients > 0)}
                         >
-                          {start.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+                          {startSpin ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
                           Resume
                         </button>
                       ) : null}
@@ -603,13 +625,15 @@ export function EmailCampaignsPage() {
         </ul>
       )}
 
-      <TablePagination
-        page={listPage}
-        totalPages={totalListPages}
-        limit={CAMPAIGNS_PAGE_SIZE}
-        onPageChange={setListPage}
-        showLimitSelect={false}
-      />
+      {!listInitialLoading ? (
+        <TablePagination
+          page={listPage}
+          totalPages={totalListPages}
+          limit={CAMPAIGNS_PAGE_SIZE}
+          onPageChange={setListPage}
+          showLimitSelect={false}
+        />
+      ) : null}
     </div>
   );
 }

@@ -12,5 +12,6 @@ export const MERGE_FIELDS = [
   { key: "backlinks", label: "Backlinks" },
   { key: "referring_domains", label: "Referring domains" },
   { key: "site_url", label: "Site URL" },
+  { key: "website_name", label: "Website name" },
   { key: "emails", label: "Emails" },
 ] as const;

@@ -15,7 +15,14 @@ import {
 } from "lucide-react";
 import { useAppDialog } from "@/contexts/app-dialog-context";
 import { apiFetch, apiUrl } from "@/lib/api";
+import {
+  extractSkippedExistingUrls,
+  formatImportExportResultLines,
+} from "@/lib/post-import-export";
+import { postImportNdjsonStream } from "@/lib/post-import-ndjson-stream";
+import { sessionQueryUserKey } from "@/lib/session-query-scope";
 import { ExportFormatMenu, type ExportChunk } from "@/components/export-format-menu";
+import { DataTableEmptyRow, DataTableLoadingRow } from "@/components/data-table-loading-empty";
 import { ImportSpreadsheetModal } from "@/components/import-spreadsheet-modal";
 import { TablePagination } from "@/components/table-pagination";
 import { useReference } from "@/hooks/use-reference";
@@ -27,7 +34,9 @@ import { CountryFlagsCell } from "@/components/country-flags-cell";
 import { DataTableRowMenu, type RowMenuItem } from "@/components/data-table-row-menu";
 import { TrafficSparkline } from "@/components/traffic-sparkline";
 
-const DEFAULT_LIST_LIMIT = 20;
+const DEFAULT_LIST_LIMIT = 100;
+
+const CLIENT_TABLE_COL_SPAN = 9;
 
 type Row = {
   id: string;
@@ -116,6 +125,22 @@ function buildClientListUrl(
   return `/clients?${qs.toString()}`;
 }
 
+function buildClientIdsUrl(scopeParam: string, searchUrl: string, f: ClientFilters) {
+  const qs = new URLSearchParams();
+  qs.set("scope", scopeParam);
+  if (searchUrl.trim()) qs.set("searchUrl", searchUrl.trim());
+  if (f.nicheId) qs.set("nicheIds", f.nicheId);
+  if (f.countryId) qs.set("countryIds", f.countryId);
+  if (f.languageId) qs.set("languageId", f.languageId);
+  appendRangeParams(qs, "traffic", f.traffic);
+  appendRangeParams(qs, "dr", f.dr);
+  appendRangeParams(qs, "mozDa", f.mozDa);
+  appendRangeParams(qs, "authorityScore", f.as);
+  appendRangeParams(qs, "referringDomains", f.ref);
+  appendRangeParams(qs, "backlinks", f.backlinks);
+  return `/clients/ids?${qs.toString()}`;
+}
+
 export function ClientTable({
   scope,
   title,
@@ -125,13 +150,15 @@ export function ClientTable({
 }) {
   const { data: session } = useSession();
   const token = session?.accessToken;
+  const userKey = sessionQueryUserKey(session);
   const qc = useQueryClient();
   const { showAlert, showConfirm } = useAppDialog();
   const { data: ref, isLoading: refLoading } = useReference();
   const [searchUrl, setSearchUrl] = useState("");
   const [page, setPage] = useState(1);
-  const listLimit = DEFAULT_LIST_LIMIT;
+  const [listLimit, setListLimit] = useState(DEFAULT_LIST_LIMIT);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [selectAllLoading, setSelectAllLoading] = useState(false);
   const undoBannerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [undoTrashBanner, setUndoTrashBanner] = useState<{ id: string } | null>(null);
 
@@ -147,8 +174,24 @@ export function ClientTable({
   const [importOpen, setImportOpen] = useState(false);
   const [sheetUrl, setSheetUrl] = useState("");
   const [importMsg, setImportMsg] = useState<string | null>(null);
+  const [importSkippedDupUrls, setImportSkippedDupUrls] = useState<string[]>([]);
+  const [importBusy, setImportBusy] = useState(false);
+  const [importProgressSummary, setImportProgressSummary] = useState<string | null>(null);
+  const importAbortRef = useRef<AbortController | null>(null);
   const [exportBusy, setExportBusy] = useState(false);
   const [colsOpen, setColsOpen] = useState(false);
+
+  const prefetchClientDetail = useCallback(
+    (id: string) => {
+      if (!token || !userKey) return;
+      void qc.prefetchQuery({
+        queryKey: ["client", userKey, id],
+        queryFn: () => apiFetch<unknown>(`/clients/${id}`, token),
+        staleTime: 30_000,
+      });
+    },
+    [qc, token, userKey],
+  );
 
   const scopeParam = scope === "active" ? "active" : "trash";
 
@@ -173,6 +216,11 @@ export function ClientTable({
   const totalPages = Math.max(1, Math.ceil(total / limit));
   const from = total === 0 ? 0 : (page - 1) * limit + 1;
   const to = Math.min(page * limit, total);
+
+  const clientEmptyMessage = useMemo(() => {
+    if (scope === "trash") return "This page is empty. There are no clients in trash.";
+    return "This page is empty. No clients in this view—add or import clients to see rows here.";
+  }, [scope]);
 
   const allIds = useMemo(() => rows.map((r) => r.id), [rows]);
 
@@ -243,8 +291,25 @@ export function ClientTable({
   }, [applied]);
 
   function toggleAll() {
-    if (selected.size === allIds.length) setSelected(new Set());
+    if (allIds.length > 0 && allIds.every((id) => selected.has(id))) setSelected(new Set());
     else setSelected(new Set(allIds));
+  }
+
+  async function selectAllMatching() {
+    if (!token || total === 0) return;
+    setSelectAllLoading(true);
+    try {
+      const url = buildClientIdsUrl(scopeParam, searchUrl, applied);
+      const res = await apiFetch<{ ids: string[]; total: number; truncated: boolean }>(url, token);
+      setSelected(new Set(res.ids));
+      if (res.truncated) {
+        void showAlert(
+          `Only the first ${res.ids.length} matching rows can be selected at once (ordering limit). Total matching: ${res.total}. Narrow filters if you need a smaller set.`,
+        );
+      }
+    } finally {
+      setSelectAllLoading(false);
+    }
   }
 
   async function confirmSoftDeleteClient(id: string) {
@@ -298,18 +363,24 @@ export function ClientTable({
     });
     setSelected(new Set());
 
-    const results = await Promise.allSettled(
-      ids.map((id) =>
-        fetch(apiUrl(`/clients/${id}`), {
-          method: "DELETE",
-          headers: { Authorization: `Bearer ${token}` },
-        }),
-      ),
-    );
-    const failed = results.filter((r) => r.status !== "fulfilled" || !r.value.ok);
-    if (failed.length) {
+    const res = await fetch(apiUrl("/clients/bulk-soft-delete"), {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ ids }),
+    });
+    if (!res.ok) {
       snapshots.forEach(([key, data]) => qc.setQueryData(key, data));
-      void showAlert(`Could not delete ${failed.length} row(s). Please try again.`);
+      void showAlert((await res.text()) || "Could not delete selected rows. Please try again.");
+      return;
+    }
+    const j = (await res.json().catch(() => ({}))) as { deleted?: number };
+    if (typeof j.deleted === "number" && j.deleted < ids.length) {
+      void showAlert(
+        `Only ${j.deleted} of ${ids.length} row(s) were moved to trash (others may have already been deleted).`,
+      );
     }
     void qc.invalidateQueries({ queryKey: ["clients"] });
     void qc.invalidateQueries({ queryKey: ["stats"] });
@@ -395,80 +466,104 @@ export function ClientTable({
 
   async function onImportCsv(file: File | null) {
     setImportMsg(null);
+    setImportSkippedDupUrls([]);
+    setImportProgressSummary(null);
     if (!file || !token) return;
     const text = await file.text();
-    const res = await fetch(apiUrl("/import-export/clients/csv"), {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({ csv: text }),
-    });
-    const j = (await res.json().catch(() => ({}))) as {
-      message?: string | string[];
-      imported?: number;
-      errors?: string[];
-    };
-    if (!res.ok) {
-      const err = j.message;
-      const errText = Array.isArray(err) ? err.join(", ") : err;
-      setImportMsg(errText || "Import failed.");
-      return;
+    importAbortRef.current = new AbortController();
+    const signal = importAbortRef.current.signal;
+    setImportBusy(true);
+    try {
+      const r = await postImportNdjsonStream(
+        "/import-export/clients/csv/stream",
+        token,
+        { csv: text },
+        {
+          signal,
+          onProgress: ({ imported, total }) => {
+            setImportProgressSummary(
+              total != null && total > 0 ? `Imported ${imported} / ${total}` : `Imported ${imported}`,
+            );
+          },
+        },
+      );
+      if (!r.ok) {
+        if (r.cancelled) {
+          setImportMsg(null);
+          void qc.invalidateQueries({ queryKey: ["clients"] });
+          void qc.invalidateQueries({ queryKey: ["stats"] });
+          return;
+        }
+        setImportMsg(r.message);
+        return;
+      }
+      setImportMsg(formatImportExportResultLines(r.data));
+      setImportSkippedDupUrls(extractSkippedExistingUrls(r.data));
+      void qc.invalidateQueries({ queryKey: ["clients"] });
+      void qc.invalidateQueries({ queryKey: ["stats"] });
+    } finally {
+      setImportBusy(false);
+      setImportProgressSummary(null);
+      importAbortRef.current = null;
     }
-    const lines: string[] = [];
-    if (j.imported != null) lines.push(`Imported ${j.imported} client(s).`);
-    if (j.message) {
-      if (Array.isArray(j.message)) lines.push(...j.message);
-      else lines.push(j.message);
-    }
-    if (j.errors?.length) lines.push(...j.errors.slice(0, 12));
-    setImportMsg(lines.join("\n") || "Import finished.");
-    void qc.invalidateQueries({ queryKey: ["clients"] });
-    void qc.invalidateQueries({ queryKey: ["stats"] });
   }
 
   async function onImportFromSheet() {
     setImportMsg(null);
+    setImportSkippedDupUrls([]);
+    setImportProgressSummary(null);
     if (!token || !sheetUrl.trim()) return;
-    const res = await fetch(apiUrl("/import-export/clients/from-sheet"), {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({ url: sheetUrl.trim() }),
-    });
-    const j = (await res.json().catch(() => ({}))) as {
-      message?: string | string[];
-      imported?: number;
-      errors?: string[];
-    };
-    if (!res.ok) {
-      const err = j.message;
-      const errText = Array.isArray(err) ? err.join(", ") : err;
-      setImportMsg(errText || "Could not fetch sheet.");
-      return;
+    importAbortRef.current = new AbortController();
+    const signal = importAbortRef.current.signal;
+    setImportBusy(true);
+    try {
+      const r = await postImportNdjsonStream(
+        "/import-export/clients/from-sheet/stream",
+        token,
+        { url: sheetUrl.trim() },
+        {
+          signal,
+          onProgress: ({ imported, total }) => {
+            setImportProgressSummary(
+              total != null && total > 0 ? `Imported ${imported} / ${total}` : `Imported ${imported}`,
+            );
+          },
+        },
+      );
+      if (!r.ok) {
+        if (r.cancelled) {
+          setImportMsg(null);
+          void qc.invalidateQueries({ queryKey: ["clients"] });
+          void qc.invalidateQueries({ queryKey: ["stats"] });
+          return;
+        }
+        setImportMsg(r.message);
+        return;
+      }
+      setImportMsg(formatImportExportResultLines(r.data));
+      setImportSkippedDupUrls(extractSkippedExistingUrls(r.data));
+      void qc.invalidateQueries({ queryKey: ["clients"] });
+      void qc.invalidateQueries({ queryKey: ["stats"] });
+    } finally {
+      setImportBusy(false);
+      setImportProgressSummary(null);
+      importAbortRef.current = null;
     }
-    const lines: string[] = [];
-    if (j.imported != null) lines.push(`Imported ${j.imported} client(s).`);
-    if (j.message) {
-      if (Array.isArray(j.message)) lines.push(...j.message);
-      else lines.push(j.message);
-    }
-    if (j.errors?.length) lines.push(...j.errors.slice(0, 12));
-    setImportMsg(lines.join("\n") || "Import finished.");
-    void qc.invalidateQueries({ queryKey: ["clients"] });
-    void qc.invalidateQueries({ queryKey: ["stats"] });
   }
 
   async function runPermanentDelete(ids: string[]) {
-    if (!token) return;
-    for (const id of ids) {
-      await fetch(apiUrl(`/clients/${id}/permanent`), {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` },
-      });
+    if (!token || !ids.length) return;
+    const res = await fetch(apiUrl("/clients/bulk-permanent-delete"), {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ ids }),
+    });
+    if (!res.ok) {
+      void showAlert((await res.text()) || "Could not delete selected rows.");
+      return;
     }
     setSelected(new Set());
     void qc.invalidateQueries({ queryKey: ["clients"] });
@@ -483,6 +578,16 @@ export function ClientTable({
         </h1>
         {scope === "active" ? (
           <div className="flex flex-wrap items-center justify-end gap-2">
+            {total > 0 ? (
+              <button
+                type="button"
+                className="btn-toolbar-outline"
+                disabled={selectAllLoading}
+                onClick={() => void selectAllMatching()}
+              >
+                {selectAllLoading ? "Loading…" : `Select all matching (${total.toLocaleString()})`}
+              </button>
+            ) : null}
             {selected.size > 0 ? (
               <button
                 type="button"
@@ -495,10 +600,11 @@ export function ClientTable({
             <button
               type="button"
               className="btn-toolbar-outline"
-              onClick={() => {
-                setImportMsg(null);
-                setImportOpen(true);
-              }}
+                onClick={() => {
+                  setImportMsg(null);
+                  setImportSkippedDupUrls([]);
+                  setImportOpen(true);
+                }}
             >
               <FileUp className="h-4 w-4 text-brand-600 dark:text-cyan-400" />
               Import
@@ -519,6 +625,16 @@ export function ClientTable({
           </div>
         ) : scope === "trash" ? (
           <div className="flex flex-wrap items-center justify-end gap-2">
+            {total > 0 ? (
+              <button
+                type="button"
+                className="btn-toolbar-outline"
+                disabled={selectAllLoading}
+                onClick={() => void selectAllMatching()}
+              >
+                {selectAllLoading ? "Loading…" : `Select all matching (${total.toLocaleString()})`}
+              </button>
+            ) : null}
             {selected.size > 0 ? (
               <>
                 <button
@@ -551,7 +667,11 @@ export function ClientTable({
 
       <ImportSpreadsheetModal
         open={importOpen}
-        onClose={() => setImportOpen(false)}
+        onClose={() => {
+          setImportOpen(false);
+          setImportSkippedDupUrls([]);
+          setImportMsg(null);
+        }}
         title="Import clients"
         subtitle="CSV file or a public Google Sheet link"
         token={token}
@@ -560,6 +680,11 @@ export function ClientTable({
         importMsg={importMsg}
         onPickCsv={(f) => void onImportCsv(f)}
         onImportFromSheet={() => void onImportFromSheet()}
+        importBusy={importBusy}
+        importProgressSummary={importBusy ? importProgressSummary : null}
+        onAbortImportFlow={() => importAbortRef.current?.abort()}
+        skippedDuplicateUrls={importSkippedDupUrls}
+        skippedDuplicatesDescription="These URLs are already in your clients list (same site), so those rows were skipped."
       />
 
       <div className="mt-4 space-y-3 text-xs text-slate-600 dark:text-slate-400">
@@ -868,36 +993,20 @@ export function ClientTable({
         </div>
       ) : null}
 
-      {isLoading && <p className="mt-4">Loading…</p>}
-
       <div className="data-table-shell mt-4">
         <table className="min-w-full text-center text-[11px]">
           <thead className="data-table-thead">
             <tr>
-              {scope === "active" && (
-                <th className="w-10 p-2.5 align-middle">
-                  <input
-                    type="checkbox"
-                    className="mx-auto block"
-                    checked={
-                      allIds.length > 0 && selected.size === allIds.length
-                    }
-                    onChange={toggleAll}
-                  />
-                </th>
-              )}
-              {scope === "trash" && (
-                <th className="w-10 p-2.5 align-middle">
-                  <input
-                    type="checkbox"
-                    className="mx-auto block"
-                    checked={
-                      allIds.length > 0 && selected.size === allIds.length
-                    }
-                    onChange={toggleAll}
-                  />
-                </th>
-              )}
+              <th className="w-10 p-2.5 align-middle">
+                <input
+                  type="checkbox"
+                  title="Select rows on this page"
+                  className="mx-auto block"
+                  disabled={isLoading}
+                  checked={allIds.length > 0 && allIds.every((id) => selected.has(id))}
+                  onChange={toggleAll}
+                />
+              </th>
               <th className="w-10 p-2.5">#</th>
               <th className="min-w-[10rem] p-2.5">Site URL</th>
               <th className="p-2.5">Niche</th>
@@ -909,7 +1018,13 @@ export function ClientTable({
             </tr>
           </thead>
           <tbody>
-            {rows.map((r, rowIdx) => {
+            {isLoading ? (
+              <DataTableLoadingRow colSpan={CLIENT_TABLE_COL_SPAN} />
+            ) : rows.length === 0 ? (
+              <DataTableEmptyRow colSpan={CLIENT_TABLE_COL_SPAN} message={clientEmptyMessage} />
+            ) : null}
+            {!isLoading && rows.length > 0
+              ? rows.map((r, rowIdx) => {
               const badge = r.completedOrderCount ?? 0;
               const cls =
                 badge >= 10 ? "text-green-600" : "text-red-600";
@@ -986,8 +1101,20 @@ export function ClientTable({
                       items={
                         scope === "active"
                           ? ([
-                              { key: "v", type: "link", label: "View", href: `/clients/${r.id}` },
-                              { key: "e", type: "link", label: "Edit", href: `/clients/${r.id}/edit` },
+                              {
+                                key: "v",
+                                type: "link",
+                                label: "View",
+                                href: `/clients/${r.id}`,
+                                prefetchOnHover: () => prefetchClientDetail(r.id),
+                              },
+                              {
+                                key: "e",
+                                type: "link",
+                                label: "Edit",
+                                href: `/clients/${r.id}/edit`,
+                                prefetchOnHover: () => prefetchClientDetail(r.id),
+                              },
                               {
                                 key: "d",
                                 type: "button",
@@ -1028,18 +1155,23 @@ export function ClientTable({
                   </td>
                 </tr>
               );
-            })}
+              })
+              : null}
           </tbody>
         </table>
       </div>
 
-      <TablePagination
-        page={page}
-        totalPages={totalPages}
-        limit={limit}
-        onPageChange={setPage}
-        showLimitSelect={false}
-      />
+      {!isLoading ? (
+        <TablePagination
+          page={page}
+          totalPages={totalPages}
+          limit={limit}
+          onPageChange={setPage}
+          onLimitChange={setListLimit}
+          limitOptions={[50, 100, 200]}
+          showLimitSelect={false}
+        />
+      ) : null}
 
     </div>
   );

@@ -14,6 +14,7 @@ type PasswordFieldProps = {
   minLength?: number;
   required?: boolean;
   placeholder?: string;
+  disabled?: boolean;
 };
 
 /** Password input with show/hide toggle (Eye icon). */
@@ -27,6 +28,7 @@ export function PasswordField({
   minLength,
   required,
   placeholder,
+  disabled,
 }: PasswordFieldProps) {
   const autoId = useId();
   const fid = id ?? autoId;
@@ -43,11 +45,13 @@ export function PasswordField({
         minLength={minLength}
         required={required}
         placeholder={placeholder}
+        disabled={disabled}
         className={cn("w-full pr-10", className)}
       />
       <button
         type="button"
-        className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md p-1.5 text-slate-500 hover:bg-slate-100 hover:text-slate-800 dark:text-slate-400 dark:hover:bg-slate-700 dark:hover:text-slate-100"
+        disabled={disabled}
+        className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md p-1.5 text-slate-500 hover:bg-slate-100 hover:text-slate-800 disabled:pointer-events-none disabled:opacity-40 dark:text-slate-400 dark:hover:bg-slate-700 dark:hover:text-slate-100"
         onClick={() => setVisible((v) => !v)}
         tabIndex={-1}
         aria-label={visible ? "Hide password" : "Show password"}

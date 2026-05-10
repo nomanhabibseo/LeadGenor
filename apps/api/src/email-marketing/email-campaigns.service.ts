@@ -14,6 +14,11 @@ import {
   Prisma,
 } from '@prisma/client';
 import { randomBytes } from 'crypto';
+import {
+  campaignProspectEmailRejection,
+  prospectEmailCellsFromImport,
+} from '../common/campaign-prospect-email';
+import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SubscriptionService } from '../subscription/subscription.service';
 import { resolveMainChainFromCampaign, type ChainStep } from './compile-main-flow';
@@ -46,6 +51,7 @@ export class EmailCampaignsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly subscription: SubscriptionService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   async completedReports(userId: string) {
@@ -322,12 +328,10 @@ export class EmailCampaignsService {
       allSenderIds.size > 0
         ? await this.prisma.emailAccount.findMany({
             where: { userId, id: { in: [...allSenderIds] }, deletedAt: null },
-            select: { id: true, displayName: true },
+            select: { id: true, fromEmail: true },
           })
         : [];
-    const displayNameByAccountId = new Map(
-      accountRows.map((a) => [a.id, (a.displayName || '').trim() || a.id]),
-    );
+    const emailByAccountId = new Map(accountRows.map((a) => [a.id, (a.fromEmail || '').trim() || a.id]));
 
     const limEngagement = await this.subscription.getLimits(userId);
 
@@ -377,7 +381,7 @@ export class EmailCampaignsService {
         replied = 0;
       }
       const senderAccountNames = parseSenderAccountIds(r.senderAccountIds).map(
-        (id) => displayNameByAccountId.get(id) ?? 'Unknown account',
+        (id) => emailByAccountId.get(id) ?? 'Unknown account',
       );
       return {
         ...r,
@@ -631,36 +635,73 @@ export class EmailCampaignsService {
     const seenTargetEmails = new Set<string>();
 
     for (const it of items) {
-      if (skipOther && inOther.has(it.id)) continue;
+      if (skipOther && inOther.has(it.id)) {
+        checkList.push({
+          email: '',
+          reason:
+            'Not added — this prospect is already in another running or scheduled campaign (skipped by your rule).',
+          siteUrl: it.siteUrl,
+        });
+        continue;
+      }
 
       if (!this.allowItem(it, campaign)) {
-        checkList.push({ email: '', reason: 'Filtered by email validation rules', siteUrl: it.siteUrl });
+        checkList.push({
+          email: '',
+          reason: 'Not added — filtered by campaign email-risk rules.',
+          siteUrl: it.siteUrl,
+        });
         continue;
       }
 
-      const emails = (it.emails as unknown as string[]) ?? [];
-      if (!emails.length) {
-        checkList.push({ email: '', reason: 'No emails on record', siteUrl: it.siteUrl });
+      const cells = prospectEmailCellsFromImport(it.emails);
+      if (!cells.length) {
+        checkList.push({
+          email: '',
+          reason:
+            'No usable email — this prospect row has no email fields stored as text (check your list import mapped the email column).',
+          siteUrl: it.siteUrl,
+        });
         continue;
       }
 
-      const targets = multi === MultiEmailPolicy.FIRST ? emails.slice(0, 1) : emails;
+      /** Valid trimmed addresses preserved in spreadsheet order within this row */
+      const validInOrder: string[] = [];
+      for (const cell of cells) {
+        const rej = campaignProspectEmailRejection(cell);
+        if (rej) {
+          checkList.push({
+            email: cell.trim() ? cell.slice(0, 120) : '(empty)',
+            reason: rej,
+            siteUrl: it.siteUrl,
+          });
+          continue;
+        }
+        validInOrder.push(cell.trim());
+      }
+
+      if (!validInOrder.length) {
+        continue;
+      }
+
+      const targets =
+        multi === MultiEmailPolicy.FIRST ? validInOrder.slice(0, 1) : validInOrder;
 
       const tplFirst = await this.prisma.emailTemplate.findFirst({
         where: { id: main[0].templateId, userId, deletedAt: null },
       });
 
       for (const email of targets) {
-        const emailNorm = email.trim().toLowerCase();
-        if (emailNorm && seenTargetEmails.has(emailNorm)) {
+        const emailNorm = email.toLowerCase();
+        if (seenTargetEmails.has(emailNorm)) {
           checkList.push({
             email,
-            reason: "Duplicate address in this campaign list (skipped)",
+            reason: 'Not added — duplicate address already selected for this campaign build.',
             siteUrl: it.siteUrl,
           });
           continue;
         }
-        if (emailNorm) seenTargetEmails.add(emailNorm);
+        seenTargetEmails.add(emailNorm);
 
         if (tplFirst) {
           const vars = buildMergeVars(it);
@@ -670,7 +711,7 @@ export class EmailCampaignsService {
           if (miss.length) {
             checkList.push({
               email,
-              reason: `Missing variables: ${miss.join(', ')}`,
+              reason: `Not added — missing merge variables required by the template: ${miss.join(', ')}.`,
               siteUrl: it.siteUrl,
             });
             if (campaign.missingVariablePolicy === MissingVariablePolicy.TO_CHECK_LIST) continue;
@@ -704,7 +745,53 @@ export class EmailCampaignsService {
       data: { checkListEntries: checkList as unknown as Prisma.InputJsonValue },
     });
 
+    if (checkList.length) {
+      await this.notifyCampaignRecipientSkips(userId, campaign.name, campaignId, checkList);
+    }
+
     return { created, checkList };
+  }
+
+  /** Best-effort in-app notification (English copy) describing rows that were not turned into recipients. */
+  private async notifyCampaignRecipientSkips(
+    userId: string,
+    campaignName: string,
+    campaignId: string,
+    checkList: { email: string; reason: string; siteUrl: string }[],
+  ) {
+    try {
+      const maxLines = 18;
+      const lines = checkList.slice(0, maxLines).map((row) => {
+        const site = row.siteUrl?.trim() || '(unknown site)';
+        const em = row.email?.trim()
+          ? ` — ${row.email.trim().slice(0, 80)}`
+          : '';
+        return `• ${site}${em}: ${row.reason}`;
+      });
+      const more =
+        checkList.length > maxLines
+          ? `\n…plus ${checkList.length - maxLines} more rows (full list stays on this campaign under the latest “to-check” summary).`
+          : '';
+      const header = `${checkList.length} prospect row(s) from your list could not be added as campaign recipients when the campaign was built.`;
+      let message = [header, '', ...lines, more].join('\n').trim();
+      message = message.slice(0, 4000);
+
+      const nm = campaignName.trim();
+      const title = (
+        nm
+          ? `"${nm.slice(0, 96)}": ${checkList.length} row(s) not added to the campaign`
+          : `${checkList.length} campaign row(s) were not added (see reasons below)`
+      ).slice(0, 200);
+
+      await this.notifications.create(userId, {
+        kind: 'warning',
+        title,
+        message,
+        href: `/email-marketing/campaigns/${campaignId}`,
+      });
+    } catch {
+      /* never block build on notifications */
+    }
   }
 
   private allowItem(

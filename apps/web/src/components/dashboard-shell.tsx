@@ -5,10 +5,11 @@ import { HeaderAccount } from "@/components/header-account";
 import { useDashboardPlansModal } from "@/contexts/dashboard-plans-modal-context";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useQuery } from "@tanstack/react-query";
-import { useSession } from "next-auth/react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { signOut, useSession } from "next-auth/react";
 import { useCallback, useEffect, useId, useState } from "react";
 import { apiFetch } from "@/lib/api";
+import type { ReferenceData } from "@/hooks/use-reference";
 import type { UsersMePayload } from "@/lib/user-subscription";
 import { isTrashModuleEnabled } from "@/lib/trash-toggles";
 import type { LucideIcon } from "lucide-react";
@@ -36,6 +37,7 @@ import {
   UserPlus,
   Users,
   X,
+  Loader2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { dashboardPathLabel } from "@/lib/dashboard-path-label";
@@ -227,24 +229,80 @@ function NavItem({
 
 export function DashboardShell({ children }: { children: React.ReactNode }) {
   const router = useRouter();
+  const qc = useQueryClient();
   const pathname = usePathname();
   const { open: openPlansModal } = useDashboardPlansModal();
-  const { data: session } = useSession();
+  const { data: session, status: sessionStatus, update } = useSession();
   const token = session?.accessToken;
-  const { data: navMe } = useQuery({
+  const [apiTokenTimedOut, setApiTokenTimedOut] = useState(false);
+
+  useEffect(() => {
+    if (sessionStatus !== "authenticated") {
+      setApiTokenTimedOut(false);
+      return;
+    }
+    if (token) {
+      setApiTokenTimedOut(false);
+      return;
+    }
+    const attempt = window.setTimeout(() => void update(), 100);
+    const timeout = window.setTimeout(() => setApiTokenTimedOut(true), 6_000);
+    return () => {
+      window.clearTimeout(attempt);
+      window.clearTimeout(timeout);
+    };
+  }, [sessionStatus, token, update]);
+
+  const {
+    data: navMe,
+    isError: navMeError,
+    error: navMeFetchError,
+    refetch: refetchNavMe,
+    isFetching: navMeFetching,
+  } = useQuery({
     queryKey: ["users", "me", token],
     queryFn: () => apiFetch<UsersMePayload>("/users/me", token),
-    enabled: !!token,
+    enabled: sessionStatus === "authenticated" && !!token,
+    staleTime: 60_000,
   });
+
   const toggles = navMe?.trashToggles;
   const isAdmin = (navMe?.email ?? "").trim().toLowerCase() === "nomanhabib.seo@gmail.com";
 
   useEffect(() => {
-    if (!token || !navMe) return;
-    if (!navMe.planChosenAt && !pathname.startsWith("/onboarding") && pathname !== "/pricing") {
-      router.replace("/pricing?from=dashboard");
+    if (sessionStatus !== "authenticated" || !token || !navMe) return;
+    if (!navMe.planChosenAt && !pathname.startsWith("/onboarding") && pathname !== "/plans") {
+      router.replace("/plans");
     }
-  }, [token, navMe, pathname, router]);
+  }, [sessionStatus, token, navMe, pathname, router]);
+
+  useEffect(() => {
+    if (sessionStatus !== "authenticated" || !token) return;
+    void qc.prefetchQuery({
+      queryKey: ["reference"],
+      queryFn: () => apiFetch<ReferenceData>("/reference", token),
+      staleTime: 300_000,
+    });
+  }, [sessionStatus, token, qc]);
+
+  useEffect(() => {
+    if (sessionStatus !== "authenticated" || !token) return;
+    router.prefetch("/dashboard");
+    router.prefetch("/email-marketing/lists");
+    router.prefetch("/email-marketing/campaigns");
+    router.prefetch("/email-marketing/templates");
+    router.prefetch("/email-marketing/accounts");
+    router.prefetch("/clients");
+    router.prefetch("/clients/new");
+    router.prefetch("/vendors");
+    router.prefetch("/vendors/new");
+    router.prefetch("/orders");
+    router.prefetch("/orders/new");
+    router.prefetch("/settings");
+    router.prefetch("/trash/lists");
+    router.prefetch("/plans");
+    router.prefetch("/onboarding/plan");
+  }, [sessionStatus, token, router]);
   const [vendorsOpen, setVendorsOpen] = useState(pathname.startsWith("/vendors"));
   const [clientsOpen, setClientsOpen] = useState(pathname.startsWith("/clients"));
   const [ordersOpen, setOrdersOpen] = useState(pathname.startsWith("/orders"));
@@ -272,6 +330,58 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
       window.removeEventListener("keydown", onKey);
     };
   }, [mobileDrawerOpen, closeMobileDrawer]);
+
+  useEffect(() => {
+    if (sessionStatus !== "unauthenticated") return;
+    const qs = typeof window !== "undefined" ? window.location.search : "";
+    router.replace(`/login?callbackUrl=${encodeURIComponent(pathname + qs)}`);
+  }, [sessionStatus, pathname, router]);
+
+  if (sessionStatus === "loading") {
+    return (
+      <div className="flex h-[100dvh] min-h-0 flex-col items-center justify-center gap-3 bg-black text-slate-300">
+        <Loader2 className="h-9 w-9 animate-spin text-violet-400" aria-hidden />
+        <p className="text-sm font-medium text-slate-400">Loading workspace…</p>
+      </div>
+    );
+  }
+
+  if (sessionStatus === "unauthenticated") {
+    return (
+      <div className="flex h-[100dvh] min-h-0 flex-col items-center justify-center gap-3 bg-black text-slate-300">
+        <Loader2 className="h-9 w-9 animate-spin text-violet-400" aria-hidden />
+        <p className="text-sm text-slate-400">Redirecting to sign in…</p>
+      </div>
+    );
+  }
+
+  /** NextAuth session hydrating without Nest JWT → refetch session; avoids blank dashboard queries. */
+  if (sessionStatus === "authenticated" && !token) {
+    return (
+      <div className="flex h-[100dvh] min-h-0 flex-col items-center justify-center gap-4 bg-black px-6 text-center text-slate-300">
+        {apiTokenTimedOut ? (
+          <>
+            <p className="max-w-md text-sm text-slate-400">
+              Your browser session loaded without an API token. Sign out and sign in again — or confirm{" "}
+              <code className="text-violet-300">NEXTAUTH_SECRET</code> is set so the JWT can be decrypted.
+            </p>
+            <button
+              type="button"
+              className="rounded-xl bg-violet-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-violet-500"
+              onClick={() => void signOut({ callbackUrl: "/login" })}
+            >
+              Sign out
+            </button>
+          </>
+        ) : (
+          <>
+            <Loader2 className="h-9 w-9 animate-spin text-violet-400" aria-hidden />
+            <p className="text-sm font-medium text-slate-400">Finishing sign-in…</p>
+          </>
+        )}
+      </div>
+    );
+  }
 
   /** Shared tree for desktop sidebar + mobile drawer (`onItemNavigate` closes drawer on tap). */
   const renderSidebarNav = (onItemNavigate?: () => void) => (
@@ -452,6 +562,26 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
             </div>
           ) : null}
           <main className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-3 md:p-6">
+            {navMeError ? (
+              <div className="mb-4 rounded-xl border border-red-400/55 bg-red-950/45 px-4 py-3 text-sm text-red-50">
+                <p className="font-semibold text-red-100">Could not load your account from the API.</p>
+                <p className="mt-1 text-xs leading-snug text-red-100/85">
+                  {navMeFetchError instanceof Error ? navMeFetchError.message : String(navMeFetchError)}
+                </p>
+                <p className="mt-2 text-xs text-red-200/90">
+                  Start or restart Nest on port 4000 before the web app (`npm run dev`). If errors mention Prisma pool timeouts,
+                  increase Postgres pool size / fix <code className="rounded bg-black/25 px-1 py-px">DATABASE_URL</code>.
+                </p>
+                <button
+                  type="button"
+                  disabled={navMeFetching}
+                  className="mt-3 rounded-lg bg-red-900/75 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-white hover:bg-red-800 disabled:opacity-55"
+                  onClick={() => void refetchNavMe()}
+                >
+                  {navMeFetching ? "Retrying…" : "Retry"}
+                </button>
+              </div>
+            ) : null}
             {navMe?.subscription?.banners?.monthlyEmailsExhausted &&
             navMe.subscription.effectiveTier === "FREE" ? (
               <div className="mb-4 rounded-xl border border-amber-300/80 bg-amber-50 px-4 py-3 text-sm text-amber-950 dark:border-amber-700/60 dark:bg-amber-950/40 dark:text-amber-50">

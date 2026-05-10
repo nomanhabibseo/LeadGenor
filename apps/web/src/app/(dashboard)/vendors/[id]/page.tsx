@@ -5,6 +5,7 @@ import { useParams } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import { useSession } from "next-auth/react";
 import { apiFetch } from "@/lib/api";
+import { sessionQueryUserKey } from "@/lib/session-query-scope";
 
 type VendorDetail = {
   id: string;
@@ -74,11 +75,13 @@ export default function VendorViewPage() {
   const id = params.id as string;
   const { data: session } = useSession();
   const token = session?.accessToken;
+  const userKey = sessionQueryUserKey(session);
 
   const { data: v, isLoading } = useQuery({
-    queryKey: ["vendor", id],
+    queryKey: ["vendor", userKey, id],
     queryFn: () => apiFetch<VendorDetail>(`/vendors/${id}`, token),
-    enabled: !!token && !!id,
+    enabled: !!token && !!id && !!userKey,
+    staleTime: 30_000,
   });
 
   if (isLoading || !v) {

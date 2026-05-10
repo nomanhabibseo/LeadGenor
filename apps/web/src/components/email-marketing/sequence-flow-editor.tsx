@@ -160,6 +160,8 @@ type SequenceFlowEditorProps = {
   onChange: (next: MainFlowStep[]) => void;
   templates: Tpl[];
   variant: SequenceVariant;
+  /** When variant is branch, pin steps to the outer edge so the two columns do not drift together (overlap). */
+  branchSide?: "left" | "right";
   readOnly?: boolean;
   blockAdd?: string | null;
   onAddBlocked?: () => void;
@@ -170,6 +172,7 @@ export function SequenceFlowEditor({
   onChange,
   templates,
   variant,
+  branchSide,
   readOnly = false,
   blockAdd = null,
   onAddBlocked,
@@ -179,6 +182,14 @@ export function SequenceFlowEditor({
   const isFollowExt = variant === "followExtension";
   const isBranch = variant === "branch";
   const flowStarted = value.length > 0;
+
+  const branchCrossAlign = isBranch
+    ? branchSide === "left"
+      ? "items-start"
+      : branchSide === "right"
+        ? "items-end"
+        : "items-center"
+    : "items-center";
 
   // Root canvas needs to allow wide Follow-Ups node (condition card).
   const innerMax = isFollowExt
@@ -258,7 +269,7 @@ export function SequenceFlowEditor({
       ) : null}
 
       {value.map((s, i) => (
-        <div key={s.id} className="group/step relative flex w-full flex-col items-center">
+        <div key={s.id} className={cn("group/step relative flex w-full flex-col", branchCrossAlign)}>
           {i > 0 ? <FlowArrowDown className={isFollowExt ? "pt-1" : undefined} /> : null}
           {s.t === "email" ? (
             <div
@@ -359,7 +370,7 @@ export function SequenceFlowEditor({
         <FlowArrowDown className={isFollowExt ? "pt-1" : undefined} />
       ) : null}
       {readOnly || hideTrailingAddAfterCondition ? null : (
-        <div className={cn("flex w-full flex-col items-center", isFollowExt ? "mt-0.5" : undefined)}>
+        <div className={cn("flex w-full flex-col", branchCrossAlign, isFollowExt ? "mt-0.5" : undefined)}>
           <AddNextStepMenu
             compact={isFollowExt || branchLike}
             blockReason={addBlock}
@@ -379,7 +390,9 @@ export function SequenceFlowEditor({
   );
 
   if (branchLike) {
-    return <div className={cn("flex w-full flex-col items-center", innerMax)}>{inner}</div>;
+    return (
+      <div className={cn("flex w-full flex-col", branchCrossAlign, innerMax)}>{inner}</div>
+    );
   }
 
   if (followExtBare) {
@@ -448,7 +461,7 @@ function ConditionStep({
   const blockChildAdds = nEmailsBefore > 0 && (!followConfigured || !waitValid) && !readOnly;
   const displayBefore = nEmailsBefore > 0 ? safeAfter : 0;
   return (
-    <div className="group/step relative mx-auto w-full max-w-[min(100%,400px)]">
+    <div className="group/step relative mx-auto w-full max-w-[min(100%,520px)]">
       <div className="mx-auto w-full max-w-[400px] px-2 sm:px-0">
         <div
           className={cn(
@@ -552,16 +565,18 @@ function ConditionStep({
 
       {nEmailsBefore > 0 ? (
         <div className="mt-2 w-full">
-          <div className="mx-auto grid w-full min-w-0 max-w-[400px] grid-cols-2 gap-x-3">
+          {/* gap + outer max give ~248px per col at 520px; branch editors align cards to outer edges (branchSide) to avoid overlap */}
+          <div className="mx-auto grid w-full min-w-0 max-w-[520px] grid-cols-2 gap-x-8">
             <div className="flex w-full min-w-0 flex-col items-start">
               <div className="ml-1 flex flex-col items-center" aria-hidden>
                 <div className={cn("h-9 w-0.5 rounded-full", flowLine)} />
                 <div className={cn("h-0 w-0 border-x-[6px] border-x-transparent border-t-[7px]", flowArrowHead)} />
               </div>
-              <div className="ml-1 flex w-max justify-start">
+              <div className="ml-1 flex w-full min-w-0 justify-start">
                 <SequenceFlowEditor
                   readOnly={readOnly}
                   variant="branch"
+                  branchSide="left"
                   value={s.no}
                   templates={_tpl}
                   onChange={(no) => onUpdate({ ...s, no })}
@@ -575,10 +590,11 @@ function ConditionStep({
                 <div className={cn("h-9 w-0.5 rounded-full", flowLine)} />
                 <div className={cn("h-0 w-0 border-x-[6px] border-x-transparent border-t-[7px]", flowArrowHead)} />
               </div>
-              <div className="mr-1 flex w-max justify-end">
+              <div className="mr-1 flex w-full min-w-0 justify-end">
                 <SequenceFlowEditor
                   readOnly={readOnly}
                   variant="branch"
+                  branchSide="right"
                   value={s.yes}
                   templates={_tpl}
                   onChange={(yes) => onUpdate({ ...s, yes })}

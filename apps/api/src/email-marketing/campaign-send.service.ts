@@ -8,11 +8,16 @@ import {
 } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { EmailAccountsService } from './email-accounts.service';
-import { resolveMainChainFromCampaign, type ChainStep } from './compile-main-flow';
+import {
+  getFollowUpV2,
+  resolveMainChainFromCampaign,
+  type ChainStep,
+} from './compile-main-flow';
 import { EmailCampaignsService } from './email-campaigns.service';
 import { EmailOAuthMailService } from './email-oauth-mail.service';
 import { htmlToPlainText } from './email-html-plain';
 import { applyMergeTemplate, buildMergeVars } from './merge-tags';
+import { heavyEmailSchedulersEnabled } from '../common/email-schedulers-allow';
 import { NotificationsService } from '../notifications/notifications.service';
 import { SubscriptionService } from '../subscription/subscription.service';
 import {
@@ -22,6 +27,17 @@ import {
 } from './inline-unsub-placeholder';
 
 const API_PUBLIC = process.env.API_PUBLIC_URL || process.env.API_URL || 'http://127.0.0.1:4000';
+
+/**
+ * In dev, a 1s poll + Prisma `connection_limit=1` (common on Supabase pooler) starves HTTP handlers — `/users/me`
+ * proxy gets ECONNRESET (see terminal). Production keeps 1s for per-account send pacing. Override with `CAMPAIGN_SEND_TICK_MS`.
+ */
+const CAMPAIGN_SEND_POLL_MS =
+  Number.parseInt(process.env.CAMPAIGN_SEND_TICK_MS ?? '', 10) > 0
+    ? Number.parseInt(process.env.CAMPAIGN_SEND_TICK_MS ?? '', 10)
+    : process.env.NODE_ENV === 'production'
+      ? 1_000
+      : 15_000;
 
 function parseSenderAccountIds(raw: unknown): string[] {
   if (Array.isArray(raw)) {
@@ -52,9 +68,73 @@ export class CampaignSendService {
     private readonly subscriptions: SubscriptionService,
   ) {}
 
+  private dayStartLocal(d = new Date()): Date {
+    return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  }
+
+  private addDays(d: Date, days: number): Date {
+    const x = new Date(d);
+    x.setDate(x.getDate() + days);
+    return x;
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async advanceFollowupWaitAfterMainDelay(rec: any) {
+    const camp = rec.campaign;
+    const rule = getFollowUpV2(camp);
+    if (!rule) {
+      await this.prisma.campaignRecipient.update({
+        where: { id: rec.id },
+        data: { status: CampaignRecipientStatus.COMPLETED, nextSendAt: null },
+      });
+      await this.markCampaignCompletedIfIdle(camp.id);
+      return;
+    }
+
+    // Claim "followup_wait" row so only one tick advances it.
+    const now = new Date();
+    const claimed = await this.prisma.campaignRecipient.updateMany({
+      where: {
+        id: rec.id,
+        status: CampaignRecipientStatus.QUEUED,
+        phase: 'followup_wait',
+        nextSendAt: { lte: now },
+      },
+      data: { status: CampaignRecipientStatus.ACTIVE },
+    });
+    if (claimed.count === 0) return;
+
+    // Decide branch after the anchor email wait window has elapsed.
+    // yes = opened but not replied; no = not opened.
+    const opened = rec.opened === true;
+    const replied = rec.replied === true;
+    const branch = opened && !replied ? 'yes' : 'no';
+    const chain = branch === 'yes' ? rule.yesChain : rule.noChain;
+    if (!chain.length || !chain[0]?.templateId) {
+      await this.prisma.campaignRecipient.update({
+        where: { id: rec.id },
+        data: { status: CampaignRecipientStatus.COMPLETED, nextSendAt: null },
+      });
+      await this.markCampaignCompletedIfIdle(camp.id);
+      return;
+    }
+
+    await this.prisma.campaignRecipient.update({
+      where: { id: rec.id },
+      data: {
+        phase: 'followup',
+        followBranch: branch,
+        stepIndex: 0,
+        nextSendAt: null,
+        status: CampaignRecipientStatus.QUEUED,
+      },
+    });
+  }
+
   /** Release rows left ACTIVE after a crash mid-send (claim uses ACTIVE as a lock). */
   @Interval(120_000)
   async recoverStuckActiveRecipients() {
+    if (!heavyEmailSchedulersEnabled()) return;
     const threshold = new Date(Date.now() - 20 * 60 * 1000);
     const r = await this.prisma.campaignRecipient.updateMany({
       where: {
@@ -68,9 +148,10 @@ export class CampaignSendService {
     }
   }
 
-  /** Polling loop for due sends. Kept at 1s to respect per-account second-level delays. */
-  @Interval(1_000)
+  /** Polling loop for due sends. Production default 1s; dev default 15s to avoid DB pool starvation. */
+  @Interval(CAMPAIGN_SEND_POLL_MS)
   async tick() {
+    if (!heavyEmailSchedulersEnabled()) return;
     if (this.tickRunning) return;
     this.tickRunning = true;
     try {
@@ -84,6 +165,25 @@ export class CampaignSendService {
       },
       data: { status: CampaignStatus.RUNNING, startedAt: now },
     });
+
+    const followupWaitDue = await this.prisma.campaignRecipient.findMany({
+      where: {
+        status: CampaignRecipientStatus.QUEUED,
+        phase: 'followup_wait',
+        nextSendAt: { lte: now },
+        campaign: { is: { status: CampaignStatus.RUNNING, deletedAt: null } },
+      },
+      include: { campaign: true, emailListItem: true },
+      take: 25,
+      orderBy: [{ nextSendAt: { sort: 'asc', nulls: 'last' } }],
+    });
+    for (const rec of followupWaitDue) {
+      try {
+        await this.advanceFollowupWaitAfterMainDelay(rec);
+      } catch (e) {
+        this.log.error(`followup_wait ${rec.id}`, e);
+      }
+    }
 
       // Recovery: if a campaign was previously deferred far into the future (e.g. old UTC-midnight logic),
       // and the first email was never sent, bring a few rows back to "due" so the campaign can start.
@@ -113,6 +213,7 @@ export class CampaignSendService {
       where: {
         /** Only QUEUED: ACTIVE is an in-flight lock; parallel ticks must not process the same row twice. */
         status: CampaignRecipientStatus.QUEUED,
+        phase: { not: 'followup_wait' },
         OR: [{ nextSendAt: null }, { nextSendAt: { lte: now } }],
         campaign: { is: { status: CampaignStatus.RUNNING, deletedAt: null } },
       },
@@ -211,10 +312,19 @@ export class CampaignSendService {
       return;
     }
 
+    const followV2 = getFollowUpV2(camp);
     const chain: ChainStep[] =
       rec.phase === 'main'
         ? resolveMainChainFromCampaign(camp)
-        : ((camp.followUpSequence as unknown as ChainStep[]) ?? []).filter((x) => x?.templateId);
+        : rec.phase === 'followup'
+          ? (() => {
+              if (followV2) {
+                const b = rec.followBranch === 'yes' ? 'yes' : 'no';
+                return (b === 'yes' ? followV2.yesChain : followV2.noChain).filter((x) => x?.templateId);
+              }
+              return ((camp.followUpSequence as unknown as ChainStep[]) ?? []).filter((x) => x?.templateId);
+            })()
+          : [];
     const step = chain[rec.stepIndex];
     if (!step?.templateId) {
       await this.prisma.campaignRecipient.update({
@@ -273,7 +383,7 @@ export class CampaignSendService {
       }
     }
 
-    const dayStart = new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate());
+    const dayStart = this.dayStartLocal();
     if (camp.dailyCampaignLimit != null && camp.dailyCampaignLimit > 0) {
       const n = await this.prisma.campaignRecipient.count({
         where: {
@@ -420,19 +530,42 @@ export class CampaignSendService {
     const cooldownUntil = new Date(Date.now() + jitterMs);
     await this.accounts.incrementSent(acc.id, cooldownUntil);
 
+    const sentAt = new Date();
     const nextIdx = rec.stepIndex + 1;
     const delayDays = step.delayDaysBeforeNext ?? 0;
     const base = Date.now() + delayDays * 86400000 + jitterMs;
 
+    /** Anchor email for follow-up v2 may be earlier in the spine than the last main email. */
+    const thisSendIsFollowupAnchor =
+      rec.phase === 'main' && !!followV2 && rec.stepIndex === followV2.afterEmailIndex;
+    const anchorForFollowupWait = thisSendIsFollowupAnchor
+      ? sentAt
+      : (rec.followupAnchorSentAt as Date | null) ?? sentAt;
+
     if (nextIdx >= chain.length) {
-      if (rec.phase === 'main' && ((camp.followUpSequence as unknown as ChainStep[]) ?? []).length) {
+      if (rec.phase === 'main' && followV2) {
+        // Wait until `waitDays` after the anchor email (not necessarily the last main email), then branch.
+        const waitUntil = this.addDays(anchorForFollowupWait, Math.max(1, followV2.waitDays));
+        await this.prisma.campaignRecipient.update({
+          where: { id: rec.id },
+          data: {
+            phase: 'followup_wait',
+            followupAnchorSentAt: anchorForFollowupWait,
+            stepIndex: 0,
+            followBranch: null,
+            nextSendAt: waitUntil,
+            lastSentAt: sentAt,
+            status: CampaignRecipientStatus.QUEUED,
+          },
+        });
+      } else if (rec.phase === 'main' && ((camp.followUpSequence as unknown as ChainStep[]) ?? []).length) {
         await this.prisma.campaignRecipient.update({
           where: { id: rec.id },
           data: {
             phase: 'followup',
             stepIndex: 0,
             nextSendAt: new Date(base),
-            lastSentAt: new Date(),
+            lastSentAt: sentAt,
             status: CampaignRecipientStatus.QUEUED,
           },
         });
@@ -442,7 +575,7 @@ export class CampaignSendService {
           data: {
             status: CampaignRecipientStatus.COMPLETED,
             nextSendAt: null,
-            lastSentAt: new Date(),
+            lastSentAt: sentAt,
           },
         });
         await this.markCampaignCompletedIfIdle(camp.id);
@@ -453,8 +586,9 @@ export class CampaignSendService {
         data: {
           stepIndex: nextIdx,
           nextSendAt: new Date(base),
-          lastSentAt: new Date(),
+          lastSentAt: sentAt,
           status: CampaignRecipientStatus.QUEUED,
+          ...(thisSendIsFollowupAnchor ? { followupAnchorSentAt: sentAt } : {}),
         },
       });
     }

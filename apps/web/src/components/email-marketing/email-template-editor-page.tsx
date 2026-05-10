@@ -20,6 +20,8 @@ import {
 } from "@/lib/email-template-unsub";
 import { MergeHighlightInput, MergeHighlightTextarea } from "@/components/merge-highlight-field";
 
+type TplBrief = { id: string; name: string; updatedAt: string };
+
 type Tpl = {
   id: string;
   name: string;
@@ -35,7 +37,7 @@ export function EmailTemplateEditorPage({ templateId }: { templateId: string }) 
   const token = session?.accessToken;
   const userKey = sessionQueryUserKey(session);
   const qc = useQueryClient();
-  const { showConfirm } = useAppDialog();
+  const { showAlert, showConfirm } = useAppDialog();
   const bodyRef = useRef<HTMLTextAreaElement>(null);
   const subjectRef = useRef<HTMLInputElement>(null);
   const subjectRangeRef = useRef({ start: 0, end: 0 });
@@ -80,29 +82,40 @@ export function EmailTemplateEditorPage({ templateId }: { templateId: string }) 
           includeUnsubscribeBlock: legacyFooterUnsub && !hasInlineUnsubscribeInBody(body),
         }),
       }),
-    onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: ["template", userKey, templateId] });
-      await invalidateTemplateRelatedQueries(qc, userKey, { folderId: tpl?.folder?.id ?? null, templateId });
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["template", userKey, templateId] });
       const fid = tpl?.folder?.id ?? null;
-      if (fid) router.push(`/email-marketing/templates/folder/${fid}`);
-      else router.push("/email-marketing/templates");
+      void invalidateTemplateRelatedQueries(qc, userKey, { folderId: fid ?? null, templateId });
+      if (fid) router.replace(`/email-marketing/templates/folder/${fid}`);
+      else router.replace("/email-marketing/templates");
     },
   });
 
   const remove = useMutation({
     mutationFn: () =>
       apiFetch(`/email-marketing/templates/items/${templateId}`, token, { method: "DELETE" }),
-    onSuccess: async () => {
+    onMutate: async () => {
       const fid = tpl?.folder?.id ?? null;
-      await invalidateTemplateRelatedQueries(qc, userKey, { folderId: fid, templateId });
-      if (fid) router.push(`/email-marketing/templates/folder/${fid}`);
-      else router.push("/email-marketing/templates");
+      await qc.cancelQueries({ queryKey: ["template-items", userKey] });
+      qc.setQueriesData<TplBrief[]>(
+        { queryKey: ["template-items", userKey] },
+        (old) => (Array.isArray(old) ? old.filter((t) => t.id !== templateId) : old),
+      );
+      if (fid) router.replace(`/email-marketing/templates/folder/${fid}`);
+      else router.replace("/email-marketing/templates");
+    },
+    onError: async (e) => {
+      await showAlert(e instanceof Error ? e.message : "Could not delete template.");
+      await invalidateTemplateRelatedQueries(qc, userKey, { folderId: tpl?.folder?.id ?? null, templateId });
+    },
+    onSettled: () => {
+      void invalidateTemplateRelatedQueries(qc, userKey, { folderId: tpl?.folder?.id ?? null, templateId });
     },
   });
 
   async function deleteNow() {
     if (!(await showConfirm("Delete this template? This cannot be undone."))) return;
-    await remove.mutateAsync();
+    remove.mutate();
   }
 
   const previewVars = useMemo(() => sampleMergeVars(), []);

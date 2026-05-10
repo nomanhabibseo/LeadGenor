@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { DealStatus, OrderStatus, PaymentTerms, Prisma, SeoLinkAttribute, TatUnit } from '@prisma/client';
 import { normalizeSiteUrl } from '@leadgenor/shared';
 import { joinEmails, parseEmails } from '../common/multi-email';
+import { websiteNameFromSiteUrl } from '../common/website-name-from-url';
 import { PrismaService } from '../prisma/prisma.service';
 import { VendorBodyDto } from './dto/vendor-body.dto';
 
@@ -44,6 +45,38 @@ type NormalizedVendorBody = {
 
 export type VendorListScope = 'all' | 'deal_done' | 'pending' | 'trash';
 
+/** Filters shared by list / listIds (no pagination). */
+export type VendorListFilters = {
+  searchUrl?: string;
+  dealStatus?: DealStatus;
+  drMin?: number;
+  drMax?: number;
+  trafficMin?: number;
+  trafficMax?: number;
+  refMin?: number;
+  refMax?: number;
+  gpPriceMin?: number;
+  gpPriceMax?: number;
+  nePriceMin?: number;
+  nePriceMax?: number;
+  dateFrom?: string;
+  dateTo?: string;
+  nicheIds?: string[];
+  nicheMode?: 'include' | 'exclude';
+  countryIds?: string[];
+  countryMode?: 'include' | 'exclude';
+  languageId?: string;
+  paymentTerms?: PaymentTerms;
+  mozDaMin?: number;
+  mozDaMax?: number;
+  authorityScoreMin?: number;
+  authorityScoreMax?: number;
+  tatValueMin?: number;
+  tatValueMax?: number;
+  backlinksMin?: number;
+  backlinksMax?: number;
+};
+
 @Injectable()
 export class VendorsService {
   constructor(private readonly prisma: PrismaService) {}
@@ -69,15 +102,6 @@ export class VendorsService {
       paymentMethods: { include: { paymentMethod: true } },
       afterLiveOption: true,
     } as const;
-  }
-
-  private hostFromSiteUrl(siteUrl: string): string {
-    try {
-      const u = siteUrl.trim().startsWith('http') ? siteUrl.trim() : `https://${siteUrl.trim()}`;
-      return new URL(u).hostname.replace(/^www\./, '');
-    } catch {
-      return 'Site';
-    }
   }
 
   private async defaultLanguageId(): Promise<string> {
@@ -109,7 +133,8 @@ export class VendorsService {
     const currencyId = dto.currencyId?.trim() || (await this.defaultCurrencyId());
     const paymentTerms = dto.paymentTerms ?? PaymentTerms.ADVANCE;
     const paymentMethodIds = dto.paymentMethodIds ?? [];
-    const companyName = (dto.companyName?.trim() || this.hostFromSiteUrl(dto.siteUrl)).slice(0, 240);
+    const derivedSiteLabel = websiteNameFromSiteUrl(dto.siteUrl) || 'Site';
+    const companyName = (dto.companyName?.trim() || derivedSiteLabel).slice(0, 240);
     const languageId = dto.languageId?.trim() || (await this.defaultLanguageId());
     return {
       companyName,
@@ -230,6 +255,48 @@ export class VendorsService {
     });
   }
 
+  /** Same inserts as {@link createAnyway}, without nested reads — optimized for CSV/sheet imports. */
+  async createAnywayForImport(userId: string, dto: VendorBodyDto) {
+    const n = await this.normalizeVendorBody(dto);
+    const siteUrlNormalized = normalizeSiteUrl(n.siteUrl);
+    await this.prisma.vendor.create({
+      data: {
+        userId,
+        companyName: n.companyName,
+        siteUrl: n.siteUrl.trim(),
+        siteUrlNormalized,
+        traffic: n.traffic,
+        dr: n.dr,
+        mozDa: n.mozDa,
+        authorityScore: n.authorityScore,
+        referringDomains: n.referringDomains,
+        backlinks: n.backlinks,
+        trustFlow: n.trustFlow,
+        seoLinkAttribute: n.seoLinkAttribute,
+        seoLinkQuantity: n.seoLinkQuantity,
+        tatUnit: n.tatUnit,
+        tatValue: n.tatValue,
+        currencyId: n.currencyId,
+        guestPostCost: toDec(n.guestPostCost),
+        nicheEditCost: toDec(n.nicheEditCost),
+        guestPostPrice: toDec(n.guestPostPrice),
+        nicheEditPrice: toDec(n.nicheEditPrice),
+        paymentTerms: n.paymentTerms,
+        afterLiveOptionId: n.afterLiveOptionId ?? null,
+        contactEmail: n.contactEmail,
+        contactPageUrl: n.contactPageUrl ?? null,
+        dealStatus: n.dealStatus,
+        recordDate: n.recordDate ? new Date(n.recordDate) : null,
+        notes: n.notes ?? null,
+        languageId: n.languageId,
+        niches: { create: n.nicheIds.map((nicheId) => ({ nicheId })) },
+        countries: { create: n.countryIds.map((countryId) => ({ countryId })) },
+        paymentMethods: { create: n.paymentMethodIds.map((paymentMethodId) => ({ paymentMethodId })) },
+      },
+      select: { id: true },
+    });
+  }
+
   async update(userId: string, id: string, dto: VendorBodyDto) {
     const n = await this.normalizeVendorBody(dto);
     const siteUrlNormalized = normalizeSiteUrl(n.siteUrl);
@@ -296,42 +363,7 @@ export class VendorsService {
     return v;
   }
 
-  async list(
-    userId: string,
-    scope: VendorListScope,
-    q: {
-      page: number;
-      limit: number;
-      searchUrl?: string;
-      dealStatus?: DealStatus;
-      drMin?: number;
-      drMax?: number;
-      trafficMin?: number;
-      trafficMax?: number;
-      refMin?: number;
-      refMax?: number;
-      gpPriceMin?: number;
-      gpPriceMax?: number;
-      nePriceMin?: number;
-      nePriceMax?: number;
-      dateFrom?: string;
-      dateTo?: string;
-      nicheIds?: string[];
-      nicheMode?: 'include' | 'exclude';
-      countryIds?: string[];
-      countryMode?: 'include' | 'exclude';
-      languageId?: string;
-      paymentTerms?: PaymentTerms;
-      mozDaMin?: number;
-      mozDaMax?: number;
-      authorityScoreMin?: number;
-      authorityScoreMax?: number;
-      tatValueMin?: number;
-      tatValueMax?: number;
-      backlinksMin?: number;
-      backlinksMax?: number;
-    },
-  ) {
+  private buildVendorListWhere(userId: string, scope: VendorListScope, q: VendorListFilters): Prisma.VendorWhereInput {
     const where: Prisma.VendorWhereInput = { userId };
 
     if (scope === 'trash') {
@@ -423,10 +455,20 @@ export class VendorsService {
       if (q.backlinksMax != null) where.backlinks.lte = q.backlinksMax;
     }
 
-    const total = await this.prisma.vendor.count({ where });
+    return where;
+  }
 
-    // Order by "most completed orders" across pagination.
-    // We cap the scan to avoid heavy queries for extremely large datasets.
+  /** Same ordering as list(): completed-order count, then updatedAt (scan capped at 2000). */
+  private async getVendorSortedIds(
+    userId: string,
+    where: Prisma.VendorWhereInput,
+  ): Promise<{
+    total: number;
+    sortedIds: string[];
+    truncated: boolean;
+    countMap: Map<string, number>;
+  }> {
+    const total = await this.prisma.vendor.count({ where });
     const MAX_SORT_SCAN = 2000;
     const all = await this.prisma.vendor.findMany({
       where,
@@ -444,17 +486,35 @@ export class VendorsService {
             _count: { _all: true },
           });
     const countMap = new Map(countsAll.map((c) => [c.vendorId, c._count._all]));
-
     const sorted = [...all].sort((a, b) => {
       const ca = countMap.get(a.id) ?? 0;
       const cb = countMap.get(b.id) ?? 0;
       if (ca !== cb) return cb - ca;
       return b.updatedAt.getTime() - a.updatedAt.getTime();
     });
+    return {
+      total,
+      sortedIds: sorted.map((r) => r.id),
+      truncated: total > sorted.length,
+      countMap,
+    };
+  }
 
-    const pageIds = sorted
-      .slice((q.page - 1) * q.limit, (q.page - 1) * q.limit + q.limit)
-      .map((r) => r.id);
+  async listIds(userId: string, scope: VendorListScope, q: VendorListFilters) {
+    const where = this.buildVendorListWhere(userId, scope, q);
+    const { total, sortedIds, truncated } = await this.getVendorSortedIds(userId, where);
+    return { ids: sortedIds, total, truncated };
+  }
+
+  async list(
+    userId: string,
+    scope: VendorListScope,
+    q: VendorListFilters & { page: number; limit: number },
+  ) {
+    const where = this.buildVendorListWhere(userId, scope, q);
+    const { total, sortedIds, countMap } = await this.getVendorSortedIds(userId, where);
+
+    const pageIds = sortedIds.slice((q.page - 1) * q.limit, (q.page - 1) * q.limit + q.limit);
     const rows =
       pageIds.length === 0
         ? []
@@ -486,6 +546,17 @@ export class VendorsService {
     });
   }
 
+  /** Single request replaces N parallel DELETEs (more reliable behind proxies / pools). */
+  async softDeleteMany(userId: string, ids: string[]) {
+    const uniq = [...new Set(ids)].filter(Boolean);
+    if (!uniq.length) return { deleted: 0 };
+    const res = await this.prisma.vendor.updateMany({
+      where: { userId, id: { in: uniq }, deletedAt: null },
+      data: { deletedAt: new Date() },
+    });
+    return { deleted: res.count };
+  }
+
   /** Quick undo within 5s of soft-delete */
   async restoreQuick(userId: string, id: string) {
     const v = await this.prisma.vendor.findFirst({ where: { id, userId } });
@@ -508,8 +579,24 @@ export class VendorsService {
   }
 
   async permanentDelete(userId: string, id: string) {
-    await this.prisma.vendor.delete({ where: { id, userId } });
+    await this.prisma.$transaction(async (tx) => {
+      await tx.order.deleteMany({ where: { userId, vendorId: id } });
+      await tx.vendor.delete({ where: { id, userId } });
+    });
     return { ok: true };
+  }
+
+  /** Orders reference vendors with onDelete: Restrict — remove those orders first. */
+  async permanentDeleteMany(userId: string, ids: string[]) {
+    const uniq = [...new Set(ids)].filter(Boolean);
+    if (!uniq.length) return { deleted: 0 };
+    return this.prisma.$transaction(async (tx) => {
+      await tx.order.deleteMany({ where: { userId, vendorId: { in: uniq } } });
+      const res = await tx.vendor.deleteMany({
+        where: { userId, id: { in: uniq }, deletedAt: { not: null } },
+      });
+      return { deleted: res.count };
+    });
   }
 
   async bulkPriceAdjustDealDone(userId: string, percent: number, applyGuestPost: boolean, applyNicheEdit: boolean) {
@@ -536,12 +623,11 @@ export class VendorsService {
 
   async purgeExpiredTrash(userId: string, retentionDays: number) {
     const cutoff = new Date(Date.now() - retentionDays * 86400000);
-    const res = await this.prisma.vendor.deleteMany({
-      where: {
-        userId,
-        deletedAt: { not: null, lt: cutoff },
-      },
+    const stale = await this.prisma.vendor.findMany({
+      where: { userId, deletedAt: { not: null, lt: cutoff } },
+      select: { id: true },
     });
-    return { deleted: res.count };
+    const ids = stale.map((v) => v.id);
+    return this.permanentDeleteMany(userId, ids);
   }
 }

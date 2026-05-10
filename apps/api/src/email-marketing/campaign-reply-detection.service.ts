@@ -9,6 +9,7 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { EmailImapSyncService } from './email-imap-sync.service';
 import { EmailOAuthMailService } from './email-oauth-mail.service';
+import { heavyEmailSchedulersEnabled } from '../common/email-schedulers-allow';
 import { NotificationsService } from '../notifications/notifications.service';
 
 function parseSenderAccountIds(raw: unknown): string[] {
@@ -52,6 +53,7 @@ export class CampaignReplyDetectionService {
 
   @Interval(90_000)
   async scanInboxesForReplies(): Promise<void> {
+    if (!heavyEmailSchedulersEnabled()) return;
     const accounts = await this.prisma.emailAccount.findMany({
       where: {
         deletedAt: null,

@@ -55,6 +55,7 @@ export function EmailListsPage() {
     queryKey: ["email-lists", userKey],
     queryFn: () => apiFetch<EmailListRow[]>("/email-marketing/lists", token),
     enabled: status === "authenticated" && !!token && !!userKey,
+    staleTime: 60_000,
   });
 
   const filteredLists = useMemo(() => {
@@ -130,7 +131,7 @@ export function EmailListsPage() {
     await remove.mutateAsync(id);
     setUndoListRestore(id);
     if (undoBannerTimerRef.current) clearTimeout(undoBannerTimerRef.current);
-    undoBannerTimerRef.current = setTimeout(() => setUndoListRestore(null), 20000);
+    undoBannerTimerRef.current = setTimeout(() => setUndoListRestore(null), 5000);
   }
 
   async function restoreListFromUndo() {

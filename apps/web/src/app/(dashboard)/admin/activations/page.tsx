@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import { useSession } from "next-auth/react";
 import { apiFetch } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { useAppDialog } from "@/contexts/app-dialog-context";
 
 type Tier = "FREE" | "PRO" | "BUSINESS";
 
@@ -52,6 +53,7 @@ export default function AdminActivationsPage() {
   const { data: session } = useSession();
   const token = session?.accessToken as string | undefined;
   const meEmail = (session?.user?.email ?? "").toString();
+  const { showConfirm } = useAppDialog();
 
   const [email, setEmail] = useState("");
   const [loading, setLoading] = useState(false);
@@ -89,7 +91,7 @@ export default function AdminActivationsPage() {
     const targetEmail = email.trim();
     const name = tier === "FREE" ? "Free" : tier === "PRO" ? "Pro" : "Business";
     const msg = `Activate ${name} for ${targetEmail}?`;
-    if (!window.confirm(msg)) return;
+    if (!(await showConfirm(msg))) return;
 
     setLoading(true);
     try {

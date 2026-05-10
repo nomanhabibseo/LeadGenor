@@ -191,10 +191,8 @@ export function EmailNewTemplatePage() {
         body,
         includeUnsubscribeBlock: false,
       });
-      await invalidateTemplateRelatedQueries(qc, userKey, { folderId: fid });
-      // After saving, return to list context (folder if known).
-      router.push(`/email-marketing/templates/folder/${fid}`);
-      router.refresh();
+      void invalidateTemplateRelatedQueries(qc, userKey, { folderId: fid });
+      router.replace(`/email-marketing/templates/folder/${fid}`);
     } catch {
       /* mutations already alerted */
     } finally {

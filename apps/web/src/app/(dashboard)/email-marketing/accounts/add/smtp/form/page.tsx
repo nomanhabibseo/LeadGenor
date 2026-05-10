@@ -75,9 +75,6 @@ function EmailAccountAddSmtpFormInner() {
     if (!token) return;
     try {
       const qs = new URLSearchParams();
-      if ((which === "displayName" || which === "both") && displayName.trim()) {
-        qs.set("displayName", displayName.trim());
-      }
       if ((which === "tag" || which === "both") && tag.trim()) {
         qs.set("tag", tag.trim());
       }
@@ -87,11 +84,6 @@ function EmailAccountAddSmtpFormInner() {
         token,
         { method: "GET" },
       );
-      if ((which === "displayName" || which === "both") && j.displayNameTaken) {
-        await showAlert(
-          "An account with this display name already exists. Please choose a different display name.",
-        );
-      }
       if ((which === "tag" || which === "both") && j.tagTaken) {
         await showAlert("This tag is already used by another account. Please choose a different unique tag.");
       }
@@ -126,18 +118,11 @@ function EmailAccountAddSmtpFormInner() {
     }
     const pre = await apiFetch<{ displayNameTaken: boolean; tagTaken: boolean }>(
       `/email-marketing/accounts/availability?${new URLSearchParams({
-        displayName: displayName.trim(),
         tag: tag.trim(),
       }).toString()}`,
       token,
       { method: "GET" },
     );
-    if (pre.displayNameTaken) {
-      await showAlert(
-        "An account with this display name already exists. Please choose a different display name before saving.",
-      );
-      return;
-    }
     if (pre.tagTaken) {
       await showAlert("This tag is already used by another account. Choose a different tag before saving.");
       return;

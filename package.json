@@ -11,7 +11,7 @@
     "dev:web": "npm run dev -w @leadgenor/web",
     "dev:web:fresh": "npm run clean:web && npm run dev:web",
     "dev:api": "npm run start:dev -w @leadgenor/api",
-    "build": "npm run build -ws --if-present",
+    "build": "npm run build -w @leadgenor/shared && npm run build -w @leadgenor/db && npm run build -w @leadgenor/api && npm run build -w @leadgenor/web",
     "db:generate": "npm run generate -w @leadgenor/db",
     "db:migrate:deploy": "npx prisma migrate deploy --schema packages/db/prisma/schema.prisma",
     "db:migrate:status": "npx prisma migrate status --schema packages/db/prisma/schema.prisma",

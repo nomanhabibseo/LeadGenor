@@ -5,15 +5,22 @@ import { normalizeSiteUrl } from '@leadgenor/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { VendorsService } from '../vendors/vendors.service';
 import type { VendorBodyDto } from '../vendors/dto/vendor-body.dto';
+import { parseAbbreviatedMetricInt } from '../common/parse-abbreviated-metric-int';
+import { websiteNameFromSiteUrl } from '../common/website-name-from-url';
+import {
+  matchBestLanguage,
+  resolveCountryIdsFromRaw,
+  resolveNicheIdsFromRaw,
+} from './reference-match';
+import { normHeader } from '../email-marketing/email-list-import';
+import type { ImportStreamHooks } from './import-stream-hooks';
 
-function normHeader(k: string) {
-  return k
-    .replace(/^\uFEFF/, '')
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, '_')
-    .replace(/[()]/g, '');
-}
+type VendorCandidate = {
+  rowLabel: number;
+  norm: string;
+  displayUrl: string;
+  dto: VendorBodyDto;
+};
 
 @Injectable()
 export class ImportVendorsService {
@@ -22,7 +29,7 @@ export class ImportVendorsService {
     private readonly vendors: VendorsService,
   ) {}
 
-  async importFromCsvText(userId: string, csv: string) {
+  async importFromCsvText(userId: string, csv: string, hooks?: ImportStreamHooks | null) {
     const parsed = Papa.parse<Record<string, string>>(csv, { header: true, skipEmptyLines: true });
     const rawRows = parsed.data.filter((r) => r && Object.values(r).some((v) => String(v ?? '').trim()));
 
@@ -36,7 +43,7 @@ export class ImportVendorsService {
     const currencyId = usd?.id ?? (await this.prisma.currency.findFirst({ orderBy: { sortOrder: 'asc' } }))?.id;
     if (!currencyId) throw new BadRequestException('No currency in database. Run seed.');
 
-    let imported = 0;
+    const candidates: VendorCandidate[] = [];
     const errors: string[] = [];
 
     for (let i = 0; i < rawRows.length; i++) {
@@ -59,59 +66,36 @@ export class ImportVendorsService {
       const siteUrl = siteRaw.startsWith('http') ? siteRaw : `https://${siteRaw}`;
       let companyName = cell('company_name', 'company', 'name');
       if (!companyName) {
-        try {
-          companyName = new URL(siteUrl).hostname.replace(/^www\./, '');
-        } catch {
-          companyName = 'Imported';
-        }
+        companyName = websiteNameFromSiteUrl(siteUrl) || 'Imported';
       }
 
       const nicheRaw = cell('niche', 'niches', 'category');
-      const nicheIds: string[] = [];
-      if (nicheRaw) {
-        for (const part of nicheRaw.split(/[,;|]/)) {
-          const label = part.trim();
-          if (!label) continue;
-          const n = niches.find(
-            (x) =>
-              x.label.toLowerCase() === label.toLowerCase() ||
-              x.slug.toLowerCase() === label.toLowerCase().replace(/\s+/g, '-'),
-          );
-          if (n) nicheIds.push(n.id);
-        }
-      }
+      const nicheIds = nicheRaw ? resolveNicheIdsFromRaw(nicheRaw, niches) : [];
       if (nicheIds.length === 0) {
-        errors.push(`Row ${i + 2}: no matching niche for "${nicheRaw || '(empty)'}". Use niche labels from your reference list.`);
+        errors.push(
+          `Row ${i + 2}: no matching niche for "${nicheRaw || '(empty)'}". Try labels like your app niches (abbreviations like "tech" are matched automatically).`,
+        );
         continue;
       }
 
       const countryRaw = cell('country', 'country_code');
-      const countryIds: string[] = [];
-      if (countryRaw) {
-        const up = countryRaw.toUpperCase();
-        const alias: Record<string, string> = { USA: 'US', UK: 'GB', UAE: 'AE' };
-        const code2 = (alias[up] ?? up).slice(0, 2);
-        const c =
-          countries.find((x) => x.code.toUpperCase() === code2) ??
-          countries.find((x) => x.name.toLowerCase() === countryRaw.toLowerCase());
-        if (c) countryIds.push(c.id);
-      }
+      const countryIds = countryRaw ? resolveCountryIdsFromRaw(countryRaw, countries) : [];
       if (countryIds.length === 0) {
-        errors.push(`Row ${i + 2}: unknown country "${countryRaw || '(empty)'}". Use a 2-letter code (US, GB, PK, …).`);
+        errors.push(
+          `Row ${i + 2}: unknown country "${countryRaw || '(empty)'}". Use a country name or 2-letter code (US, LK, …).`,
+        );
         continue;
       }
 
       const langRaw = cell('language', 'lang') || 'en';
-      const lang =
-        languages.find((l) => l.code.toLowerCase() === langRaw.toLowerCase()) ??
-        languages.find((l) => l.name.toLowerCase() === langRaw.toLowerCase());
+      const lang = matchBestLanguage(langRaw, languages);
       if (!lang) {
         errors.push(`Row ${i + 2}: unknown language "${langRaw}".`);
         continue;
       }
 
       const dr = Number.parseInt(cell('dr', 'domain_rating') || '0', 10) || 0;
-      const traffic = Number.parseInt(cell('traffic', 'monthly_traffic') || '0', 10) || 0;
+      const traffic = parseAbbreviatedMetricInt(cell('traffic', 'monthly_traffic'));
       const gp = Number.parseFloat(cell('guest_post_price', 'guest_post_reselling_price', 'gp_price', 'reseller_price') || '0') || 0;
       const ne = Number.parseFloat(cell('niche_edit_price', 'ne_price') || '0') || 0;
 
@@ -126,8 +110,18 @@ export class ImportVendorsService {
         traffic,
         mozDa: Number.parseInt(cell('moz_da', 'da') || '0', 10) || 0,
         authorityScore: Number.parseInt(cell('authority_score', 'as') || '0', 10) || 0,
-        referringDomains: Number.parseInt(cell('referring_domains', 'ref_domains') || '0', 10) || 0,
-        backlinks: Number.parseInt(cell('backlinks') || '0', 10) || 0,
+        referringDomains: parseAbbreviatedMetricInt(
+          cell(
+            'referring_domains',
+            'ref_domains',
+            'def_domains',
+            'referring_domain',
+            'ref_domain',
+            'ref_domains_ips',
+            'def_domains_ips',
+          ),
+        ),
+        backlinks: parseAbbreviatedMetricInt(cell('backlinks')),
         trustFlow: Number.parseInt(cell('trust_flow', 'tf') || '0', 10) || 0,
         guestPostCost: Number.parseFloat(cell('guest_post_cost', 'gp_cost') || '0') || 0,
         nicheEditCost: Number.parseFloat(cell('niche_edit_cost', 'ne_cost') || '0') || 0,
@@ -141,23 +135,75 @@ export class ImportVendorsService {
         paymentMethodIds: firstPm ? [firstPm.id] : [],
       };
 
+      const norm = normalizeSiteUrl(siteUrl);
+      candidates.push({
+        rowLabel: i + 2,
+        norm,
+        displayUrl: siteUrl.trim(),
+        dto,
+      });
+    }
+
+    const norms = [...new Set(candidates.map((c) => c.norm))];
+    const existingRows =
+      norms.length > 0
+        ? await this.prisma.vendor.findMany({
+            where: { userId, deletedAt: null, siteUrlNormalized: { in: norms } },
+            select: { siteUrlNormalized: true },
+          })
+        : [];
+    const seen = new Set(existingRows.map((e) => e.siteUrlNormalized));
+
+    const skippedDisplayUrls: string[] = [];
+    let imported = 0;
+    let cancelledEarly = false;
+    const totalRows = candidates.length;
+
+    for (const c of candidates) {
+      if (hooks?.isCancelled?.()) {
+        cancelledEarly = true;
+        break;
+      }
+      if (seen.has(c.norm)) {
+        skippedDisplayUrls.push(c.displayUrl);
+        continue;
+      }
       try {
-        await this.vendors.createAnyway(userId, dto);
+        await this.vendors.createAnywayForImport(userId, c.dto);
         imported++;
+        seen.add(c.norm);
+        hooks?.onProgress?.({ imported, totalRows });
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);
-        errors.push(`Row ${i + 2}: ${msg}`);
+        errors.push(`Row ${c.rowLabel}: ${msg}`);
       }
+    }
+
+    const uniqueSkipped = [...new Set(skippedDisplayUrls)];
+
+    let message: string;
+    if (cancelledEarly) {
+      message =
+        imported > 0
+          ? `Import stopped. ${imported} vendor(s) were saved before cancel.`
+          : 'Import stopped before any new vendors were saved.';
+    } else if (imported > 0) {
+      message = `Successfully imported ${imported} vendor(s).`;
+    } else if (uniqueSkipped.length > 0 && errors.length === 0) {
+      message = 'No new vendors were imported — all site URLs already exist in your data.';
+    } else {
+      message = 'No vendors were imported. Fix errors below and try again.';
     }
 
     return {
       imported,
       failed: rawRows.length - imported,
       errors: errors.slice(0, 30),
-      message:
-        imported > 0
-          ? `Successfully imported ${imported} vendor(s).`
-          : 'No vendors were imported. Fix errors below and try again.',
+      skippedExistingCount: uniqueSkipped.length,
+      skippedExistingUrls: uniqueSkipped.slice(0, 400),
+      message,
+      cancelled: cancelledEarly,
     };
   }
 }
+

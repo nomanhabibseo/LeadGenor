@@ -28,6 +28,7 @@ export function OrderForm({ orderId }: { orderId?: string }) {
     queryFn: () =>
       apiFetch<{ data: { id: string; siteUrl: string; email: string }[] }>("/clients?page=1&limit=200", token),
     enabled: !!token,
+    staleTime: 60_000,
   });
 
   const {
@@ -39,6 +40,7 @@ export function OrderForm({ orderId }: { orderId?: string }) {
     queryFn: () =>
       apiFetch<{ data: { id: string; siteUrl: string }[] }>("/vendors?scope=all&page=1&limit=200", token),
     enabled: !!token,
+    staleTime: 60_000,
   });
 
   const [form, setForm] = useState({
@@ -110,6 +112,7 @@ export function OrderForm({ orderId }: { orderId?: string }) {
       }>(`/orders/preview-price?${qs.toString()}`, token);
     },
     enabled: !!token && !!effectiveVendorId,
+    staleTime: 30_000,
   });
 
   useEffect(() => {

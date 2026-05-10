@@ -14,7 +14,7 @@ import { SequenceFlowEditor } from "@/components/email-marketing/sequence-flow-e
 import { FormSwitch } from "@/components/ui/form-switch";
 import {
   chainStepsToMainFlow,
-  compileMainFlowToChain,
+  compileMainFlowForCampaign,
   defaultFollowUi,
   type ChainStep,
   type MainFlowStep,
@@ -55,6 +55,7 @@ type Account = {
   id: string;
   displayName: string;
   tag: string;
+  fromEmail?: string;
   campaignsEnabled?: boolean;
   connectionStatus?: string | null;
 };
@@ -241,8 +242,8 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
   const [ignoreSchedule, setIgnoreSchedule] = useState(true);
   const [scheduleLocal, setScheduleLocal] = useState("");
   const [senderPickerOpen, setSenderPickerOpen] = useState(false);
-  const [reviewAction, setReviewAction] = useState<null | "save" | "run" | "schedule">(null);
-  const [newRunPending, setNewRunPending] = useState(false);
+  /** Step 5 footer: only this action shows a spinner; avoids shared `save.isPending` flashing every button. */
+  const [reviewBusy, setReviewBusy] = useState<null | "save-draft" | "run" | "schedule" | "save-paused">(null);
 
   const { data: camp } = useQuery({
     queryKey: ["campaign", userKey, campaignId],
@@ -340,9 +341,9 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
     }
     setMainFlow(graph);
     setFlags({
-      doNotSendUnverified: camp.doNotSendUnverified,
-      doNotSendRisky: camp.doNotSendRisky,
-      doNotSendInvalid: camp.doNotSendInvalid,
+      doNotSendUnverified: false,
+      doNotSendRisky: false,
+      doNotSendInvalid: false,
       multiEmailPolicy: camp.multiEmailPolicy,
       skipIfInOtherCampaign: camp.skipIfInOtherCampaign,
       missingVariablePolicy: camp.missingVariablePolicy,
@@ -451,18 +452,21 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
   }
 
   function buildBody(wizardStep: number): Record<string, unknown> {
-    const mainSeq = compileMainFlowToChain(mainFlow);
-    const followRule = defaultFollowUi();
+    const compiled = compileMainFlowForCampaign(mainFlow);
+    const followRule = compiled.followUp ?? defaultFollowUi();
     return {
       name,
       emailListId: listId,
       wizardStep,
       senderAccountIds: senders,
-      mainSequence: mainSeq,
+      mainSequence: compiled.mainChain,
       mainFlowGraph: mainFlow,
       followUpSequence: [],
       followUpStartRule: followRule,
       ...flags,
+      doNotSendUnverified: false,
+      doNotSendRisky: false,
+      doNotSendInvalid: false,
       stopFollowUpsOnReply: flags.stopFollowUpsOnReply,
       dailyCampaignLimit: (() => {
         if (flags.dailyCampaignLimit === "") return null;
@@ -497,8 +501,8 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
       return true;
     }
     if (s === 3) {
-      const seq = compileMainFlowToChain(mainFlow);
-      if (!seq.length) {
+      const compiled = compileMainFlowForCampaign(mainFlow);
+      if (!compiled.mainChain.length) {
         await showAlert("Complete this step to continue to the next one. Add at least one email template to the sequence.");
         return false;
       }
@@ -611,15 +615,10 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
     const skipRecipientBuild =
       camp?.status === "PAUSED" && Array.isArray(camp.recipients) && camp.recipients.length > 0;
     if (isNewCampaign) {
-      setNewRunPending(true);
-      try {
-        await apiFetch(`/email-marketing/campaigns/${id}/start`, token, {
-          method: "POST",
-          body: JSON.stringify({ skipRecipientBuild: false }),
-        });
-      } finally {
-        setNewRunPending(false);
-      }
+      await apiFetch(`/email-marketing/campaigns/${id}/start`, token, {
+        method: "POST",
+        body: JSON.stringify({ skipRecipientBuild: false }),
+      });
     } else {
       await startCamp.mutateAsync({ skipRecipientBuild });
     }
@@ -630,8 +629,8 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
   }
 
   async function savePausedFromRunningOnly() {
-    if (reviewAction) return;
-    setReviewAction("save");
+    if (reviewBusy) return;
+    setReviewBusy("save-paused");
     try {
       const dailyCampaignLimit = (() => {
         if (flags.dailyCampaignLimit === "") return null;
@@ -648,37 +647,37 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
       const msg = e instanceof Error ? e.message : "Could not save changes.";
       await showAlert(msg);
     } finally {
-      setReviewAction(null);
+      setReviewBusy(null);
     }
   }
 
   async function onReviewSaveDraft() {
-    if (reviewAction) return;
-    setReviewAction("save");
+    if (reviewBusy) return;
+    setReviewBusy("save-draft");
     try {
       await saveCampaignFinalize();
     } finally {
-      setReviewAction(null);
+      setReviewBusy(null);
     }
   }
 
   async function onReviewRunNow() {
-    if (reviewAction) return;
-    setReviewAction("run");
+    if (reviewBusy) return;
+    setReviewBusy("run");
     try {
       await saveAndLaunchCampaign();
     } finally {
-      setReviewAction(null);
+      setReviewBusy(null);
     }
   }
 
   async function onReviewSaveSchedule() {
-    if (reviewAction) return;
-    setReviewAction("schedule");
+    if (reviewBusy) return;
+    setReviewBusy("schedule");
     try {
       await saveScheduleOnly();
     } finally {
-      setReviewAction(null);
+      setReviewBusy(null);
     }
   }
 
@@ -702,12 +701,10 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
   const canUseReviewSaves = step === 5;
   /** Step 5: a real datetime is set (not “start now”). Primary CTA label becomes “Save Schedule”. */
   const reviewUsesScheduledStart = !ignoreSchedule && Boolean(scheduleLocal.trim());
-  const reviewSchedulePendingLabel =
-    reviewAction === "schedule" && (startCamp.isPending || save.isPending) ? "Scheduling…" : "Save Schedule";
-  const reviewRunPendingLabel =
-    reviewAction === "run" && (startCamp.isPending || save.isPending || newRunPending) ? "Starting…" : "Run Campaign";
-  const reviewSavePendingLabel = reviewAction === "save" && save.isPending ? "Saving…" : "Save Campaign";
-  const reviewPausedOnlySaveLabel = reviewAction === "save" && save.isPending ? "Saving…" : "Save changes";
+  const reviewSchedulePendingLabel = reviewBusy === "schedule" ? "Scheduling…" : "Save Schedule";
+  const reviewRunPendingLabel = reviewBusy === "run" ? "Starting…" : "Run Campaign";
+  const reviewSavePendingLabel = reviewBusy === "save-draft" ? "Saving…" : "Save Campaign";
+  const reviewPausedOnlySaveLabel = reviewBusy === "save-paused" ? "Saving…" : "Save changes";
 
   const doNotSendSummary = (() => {
     const parts: string[] = [];
@@ -837,8 +834,8 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
                       }
                     />
                     <div>
-                      <div className="font-medium text-slate-900 dark:text-white">{a.displayName}</div>
-                      <div className="text-xs text-slate-500">Tag: {a.tag}</div>
+                      <div className="text-sm font-semibold text-slate-900 dark:text-white">{a.tag}</div>
+                      <div className="text-xs text-slate-600 dark:text-slate-400">{a.fromEmail ?? ""}</div>
                     </div>
                   </label>
                 </li>
@@ -983,28 +980,28 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
               <div className="flex items-center justify-between gap-2 rounded-lg border border-slate-200 bg-slate-50/80 px-2.5 py-2 dark:border-slate-600 dark:bg-slate-800/40">
                 <span className="text-xs font-medium text-slate-700 dark:text-slate-300">Unverified emails</span>
                 <FormSwitch
-                  on={flags.doNotSendUnverified}
-                  onToggle={() => setFlags({ ...flags, doNotSendUnverified: !flags.doNotSendUnverified })}
-                  aria-label="Do not send to unverified emails"
-                  disabled={isPausedFromRunning}
+                  on={false}
+                  onToggle={() => {}}
+                  aria-label="Do not send to unverified emails (disabled)"
+                  disabled
                 />
               </div>
               <div className="flex items-center justify-between gap-2 rounded-lg border border-slate-200 bg-slate-50/80 px-2.5 py-2 dark:border-slate-600 dark:bg-slate-800/40">
                 <span className="text-xs font-medium text-slate-700 dark:text-slate-300">Risky emails</span>
                 <FormSwitch
-                  on={flags.doNotSendRisky}
-                  onToggle={() => setFlags({ ...flags, doNotSendRisky: !flags.doNotSendRisky })}
-                  aria-label="Do not send to risky emails"
-                  disabled={isPausedFromRunning}
+                  on={false}
+                  onToggle={() => {}}
+                  aria-label="Do not send to risky emails (disabled)"
+                  disabled
                 />
               </div>
               <div className="flex items-center justify-between gap-2 rounded-lg border border-slate-200 bg-slate-50/80 px-2.5 py-2 dark:border-slate-600 dark:bg-slate-800/40">
                 <span className="text-xs font-medium text-slate-700 dark:text-slate-300">Invalid emails</span>
                 <FormSwitch
-                  on={flags.doNotSendInvalid}
-                  onToggle={() => setFlags({ ...flags, doNotSendInvalid: !flags.doNotSendInvalid })}
-                  aria-label="Do not send to invalid emails"
-                  disabled={isPausedFromRunning}
+                  on={false}
+                  onToggle={() => {}}
+                  aria-label="Do not send to invalid emails (disabled)"
+                  disabled
                 />
               </div>
             </div>
@@ -1383,29 +1380,21 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
               <button
                 type="button"
                 className="btn-save-primary-sm inline-flex items-center gap-2"
-                disabled={!canUseReviewSaves || !!reviewAction || save.isPending}
+                disabled={!canUseReviewSaves || !!reviewBusy}
                 onClick={() => void savePausedFromRunningOnly()}
               >
-                {reviewAction === "save" && save.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                {reviewBusy === "save-paused" ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
                 {reviewPausedOnlySaveLabel}
               </button>
             ) : reviewUsesScheduledStart ? (
               <button
                 type="button"
                 className="inline-flex items-center gap-2 rounded-lg border border-indigo-600 bg-indigo-600 px-3 py-1 text-sm font-medium text-white shadow-sm disabled:opacity-40 dark:border-indigo-500 dark:bg-indigo-600"
-                disabled={
-                  !canUseReviewSaves ||
-                  !!reviewAction ||
-                  save.isPending ||
-                  startCamp.isPending ||
-                  camp?.status === "COMPLETED"
-                }
+                disabled={!canUseReviewSaves || !!reviewBusy || camp?.status === "COMPLETED"}
                 title="Save schedule — campaign will start at the scheduled date/time"
                 onClick={() => void onReviewSaveSchedule()}
               >
-                {reviewAction === "schedule" && (startCamp.isPending || save.isPending) ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : null}
+                {reviewBusy === "schedule" ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
                 {reviewSchedulePendingLabel}
               </button>
             ) : (
@@ -1413,10 +1402,10 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
                 <button
                   type="button"
                   className="btn-save-primary-sm inline-flex items-center gap-2"
-                  disabled={!canUseReviewSaves || !!reviewAction || save.isPending}
+                  disabled={!canUseReviewSaves || !!reviewBusy}
                   onClick={() => void onReviewSaveDraft()}
                 >
-                  {reviewAction === "save" && save.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                  {reviewBusy === "save-draft" ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
                   {reviewSavePendingLabel}
                 </button>
                 <button
@@ -1424,19 +1413,14 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
                   className="inline-flex items-center gap-2 rounded-lg border border-emerald-600 bg-emerald-600 px-3 py-1 text-sm font-medium text-white shadow-sm disabled:opacity-40 dark:border-emerald-500 dark:bg-emerald-600"
                   disabled={
                     !canUseReviewSaves ||
-                    !!reviewAction ||
-                    save.isPending ||
-                    startCamp.isPending ||
-                    newRunPending ||
+                    !!reviewBusy ||
                     camp?.status === "RUNNING" ||
                     camp?.status === "COMPLETED"
                   }
                   title="Run campaign now (builds recipients from the list)"
                   onClick={() => void onReviewRunNow()}
                 >
-                  {reviewAction === "run" && (startCamp.isPending || save.isPending || newRunPending) ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : null}
+                  {reviewBusy === "run" ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
                   {reviewRunPendingLabel}
                 </button>
               </>

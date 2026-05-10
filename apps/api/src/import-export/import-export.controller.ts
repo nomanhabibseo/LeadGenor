@@ -1,5 +1,5 @@
-import { BadRequestException, Body, Controller, Post, Res, UseGuards } from '@nestjs/common';
-import { Response } from 'express';
+import { BadRequestException, Body, Controller, Post, Req, Res, UseGuards } from '@nestjs/common';
+import { Request, Response } from 'express';
 import * as Papa from 'papaparse';
 import * as XLSX from 'xlsx';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
@@ -8,25 +8,51 @@ import { PrismaService } from '../prisma/prisma.service';
 import { ImportVendorsService } from './import-vendors.service';
 import { ImportClientsService } from './import-clients.service';
 import { OrdersService } from '../orders/orders.service';
+import { normHeader } from '../email-marketing/email-list-import';
+import { fetchGoogleSheetAsCsv } from './google-sheet-download';
+import { requestImportCancelCheck } from './import-stream-hooks';
 
-async function fetchGoogleSheetAsCsv(url: string): Promise<string> {
-  const trimmed = url.trim();
-  const idMatch = trimmed.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
-  if (!idMatch) {
-    throw new BadRequestException('Paste a Google Sheets link (docs.google.com/spreadsheets/d/...).');
-  }
-  const id = idMatch[1];
-  const gidMatch = trimmed.match(/[#&?]gid=(\d+)/);
-  let exportUrl = `https://docs.google.com/spreadsheets/d/${id}/export?format=csv`;
-  if (gidMatch) exportUrl += `&gid=${gidMatch[1]}`;
-  const res = await fetch(exportUrl, { redirect: 'follow' });
-  if (!res.ok) {
-    throw new BadRequestException(
-      `Could not download the sheet (HTTP ${res.status}). Use File → Share → "Anyone with the link" (viewer).`,
-    );
-  }
-  return res.text();
-}
+/** Normalized header tokens that list/vendors/clients CSV parsers recognize (subset). */
+const KNOWN_IMPORT_HEADERS = new Set([
+  'site_url',
+  'url',
+  'website',
+  'site',
+  'company_name',
+  'company',
+  'email',
+  'emails',
+  'contact_email',
+  'niche',
+  'category',
+  'country',
+  'traffic',
+  'monthly_traffic',
+  'dr',
+  'domain_rating',
+  'da',
+  'moz_da',
+  'authority_score',
+  'as',
+  'backlinks',
+  'referring_domains',
+  'referring_domain',
+  'ref_domains',
+  'ref_domain',
+  'def_domains',
+  'ref_domains_ips',
+  'def_domains_ips',
+  'contact_kind',
+  'type',
+  'client_name',
+  'vendor_name',
+  'contact_name',
+  'name',
+  'client',
+  'vendor',
+  'language',
+  'lang',
+]);
 
 @Controller('import-export')
 @UseGuards(JwtAuthGuard)
@@ -38,6 +64,33 @@ export class ImportExportController {
     private readonly orders: OrdersService,
   ) {}
 
+  /** Fetch header row + row count from a published Google Sheet (same export URL as imports). */
+  @Post('sheet-preview')
+  async sheetPreview(@Body() body: { url: string }) {
+    if (!body?.url?.trim()) {
+      throw new BadRequestException('Sheet URL is required.');
+    }
+    let csv: string;
+    try {
+      csv = await fetchGoogleSheetAsCsv(body.url);
+    } catch (e: unknown) {
+      if (e instanceof BadRequestException) throw e;
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new BadRequestException(`Could not preview sheet: ${msg}`);
+    }
+    const lines = csv.split(/\r?\n/).filter((l) => l.trim().length > 0);
+    if (!lines.length) {
+      throw new BadRequestException('Sheet appears empty.');
+    }
+    const headerParse = Papa.parse<string[]>(lines[0], { header: false });
+    const row0 = (headerParse.data[0] as string[]) ?? [];
+    const columns = row0.map((c) => String(c).trim().replace(/^\uFEFF/, '')).filter(Boolean);
+    const normalizedColumns = columns.map((c) => normHeader(c));
+    const matchedHints = normalizedColumns.filter((n) => n && KNOWN_IMPORT_HEADERS.has(n));
+    const approxDataRows = Math.max(0, lines.length - 1);
+    return { columns, normalizedColumns, matchedHints, approxDataRows };
+  }
+
   @Post('vendors/csv')
   async importVendorsCsv(@CurrentUser() user: JwtUser, @Body() body: { csv: string }) {
     if (!body?.csv?.trim()) {
@@ -46,13 +99,89 @@ export class ImportExportController {
     return this.importVendors.importFromCsvText(user.userId, body.csv);
   }
 
+  @Post('vendors/csv/stream')
+  async importVendorsCsvStream(
+    @CurrentUser() user: JwtUser,
+    @Body() body: { csv: string },
+    @Req() req: Request,
+    @Res({ passthrough: false }) res: Response,
+  ) {
+    if (!body?.csv?.trim()) throw new BadRequestException('CSV content is required.');
+    const abort = requestImportCancelCheck(req);
+    res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('X-Accel-Buffering', 'no');
+    (res as unknown as { flushHeaders?: () => void }).flushHeaders?.();
+    try {
+      const result = await this.importVendors.importFromCsvText(user.userId, body.csv, {
+        isCancelled: () => abort.isCancelled(),
+        onProgress: (p) => {
+          if (abort.isCancelled()) return;
+          res.write(`${JSON.stringify({ type: 'progress', imported: p.imported, total: p.totalRows })}\n`);
+        },
+      });
+      res.write(`${JSON.stringify({ type: 'done', ...result })}\n`);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      res.write(`${JSON.stringify({ type: 'error', message: msg })}\n`);
+    }
+    res.end();
+  }
+
   @Post('vendors/from-sheet')
   async importVendorsFromSheet(@CurrentUser() user: JwtUser, @Body() body: { url: string }) {
     if (!body?.url?.trim()) {
       throw new BadRequestException('Sheet URL is required.');
     }
-    const csv = await fetchGoogleSheetAsCsv(body.url);
-    return this.importVendors.importFromCsvText(user.userId, csv);
+    try {
+      const csv = await fetchGoogleSheetAsCsv(body.url);
+      return this.importVendors.importFromCsvText(user.userId, csv);
+    } catch (e: unknown) {
+      if (e instanceof BadRequestException) throw e;
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new BadRequestException(
+        `Could not load the sheet. Check sharing (Anyone with the link) and try CSV upload if this persists: ${msg}`,
+      );
+    }
+  }
+
+  @Post('vendors/from-sheet/stream')
+  async importVendorsFromSheetStream(
+    @CurrentUser() user: JwtUser,
+    @Body() body: { url: string },
+    @Req() req: Request,
+    @Res({ passthrough: false }) res: Response,
+  ) {
+    if (!body?.url?.trim()) throw new BadRequestException('Sheet URL is required.');
+    let csv: string;
+    try {
+      csv = await fetchGoogleSheetAsCsv(body.url);
+    } catch (e: unknown) {
+      if (e instanceof BadRequestException) throw e;
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new BadRequestException(
+        `Could not load the sheet. Check sharing (Anyone with the link) and try CSV upload if this persists: ${msg}`,
+      );
+    }
+    const abort = requestImportCancelCheck(req);
+    res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('X-Accel-Buffering', 'no');
+    (res as unknown as { flushHeaders?: () => void }).flushHeaders?.();
+    try {
+      const result = await this.importVendors.importFromCsvText(user.userId, csv, {
+        isCancelled: () => abort.isCancelled(),
+        onProgress: (p) => {
+          if (abort.isCancelled()) return;
+          res.write(`${JSON.stringify({ type: 'progress', imported: p.imported, total: p.totalRows })}\n`);
+        },
+      });
+      res.write(`${JSON.stringify({ type: 'done', ...result })}\n`);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      res.write(`${JSON.stringify({ type: 'error', message: msg })}\n`);
+    }
+    res.end();
   }
 
   @Post('clients/csv')
@@ -63,13 +192,89 @@ export class ImportExportController {
     return this.importClients.importFromCsvText(user.userId, body.csv);
   }
 
+  @Post('clients/csv/stream')
+  async importClientsCsvStream(
+    @CurrentUser() user: JwtUser,
+    @Body() body: { csv: string },
+    @Req() req: Request,
+    @Res({ passthrough: false }) res: Response,
+  ) {
+    if (!body?.csv?.trim()) throw new BadRequestException('CSV content is required.');
+    const abort = requestImportCancelCheck(req);
+    res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('X-Accel-Buffering', 'no');
+    (res as unknown as { flushHeaders?: () => void }).flushHeaders?.();
+    try {
+      const result = await this.importClients.importFromCsvText(user.userId, body.csv, {
+        isCancelled: () => abort.isCancelled(),
+        onProgress: (p) => {
+          if (abort.isCancelled()) return;
+          res.write(`${JSON.stringify({ type: 'progress', imported: p.imported, total: p.totalRows })}\n`);
+        },
+      });
+      res.write(`${JSON.stringify({ type: 'done', ...result })}\n`);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      res.write(`${JSON.stringify({ type: 'error', message: msg })}\n`);
+    }
+    res.end();
+  }
+
   @Post('clients/from-sheet')
   async importClientsFromSheet(@CurrentUser() user: JwtUser, @Body() body: { url: string }) {
     if (!body?.url?.trim()) {
       throw new BadRequestException('Sheet URL is required.');
     }
-    const csv = await fetchGoogleSheetAsCsv(body.url);
-    return this.importClients.importFromCsvText(user.userId, csv);
+    try {
+      const csv = await fetchGoogleSheetAsCsv(body.url);
+      return this.importClients.importFromCsvText(user.userId, csv);
+    } catch (e: unknown) {
+      if (e instanceof BadRequestException) throw e;
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new BadRequestException(
+        `Could not load the sheet. Check sharing (Anyone with the link) and try CSV upload if this persists: ${msg}`,
+      );
+    }
+  }
+
+  @Post('clients/from-sheet/stream')
+  async importClientsFromSheetStream(
+    @CurrentUser() user: JwtUser,
+    @Body() body: { url: string },
+    @Req() req: Request,
+    @Res({ passthrough: false }) res: Response,
+  ) {
+    if (!body?.url?.trim()) throw new BadRequestException('Sheet URL is required.');
+    let csv: string;
+    try {
+      csv = await fetchGoogleSheetAsCsv(body.url);
+    } catch (e: unknown) {
+      if (e instanceof BadRequestException) throw e;
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new BadRequestException(
+        `Could not load the sheet. Check sharing (Anyone with the link) and try CSV upload if this persists: ${msg}`,
+      );
+    }
+    const abort = requestImportCancelCheck(req);
+    res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('X-Accel-Buffering', 'no');
+    (res as unknown as { flushHeaders?: () => void }).flushHeaders?.();
+    try {
+      const result = await this.importClients.importFromCsvText(user.userId, csv, {
+        isCancelled: () => abort.isCancelled(),
+        onProgress: (p) => {
+          if (abort.isCancelled()) return;
+          res.write(`${JSON.stringify({ type: 'progress', imported: p.imported, total: p.totalRows })}\n`);
+        },
+      });
+      res.write(`${JSON.stringify({ type: 'done', ...result })}\n`);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      res.write(`${JSON.stringify({ type: 'error', message: msg })}\n`);
+    }
+    res.end();
   }
 
   @Post('clients/export')

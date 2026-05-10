@@ -4,11 +4,15 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { useSession } from "next-auth/react";
-import { useState } from "react";
-import { Upload, X } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Loader2, Upload, X } from "lucide-react";
 import { useAppDialog } from "@/contexts/app-dialog-context";
+import { SheetPreviewPanel } from "@/components/sheet-preview-panel";
 import { apiFetch } from "@/lib/api";
+import { postImportExport } from "@/lib/post-import-export";
+import { useSheetPreview } from "@/hooks/use-sheet-preview";
 import { sessionQueryUserKey } from "@/lib/session-query-scope";
+import { SHEET_IMPORT_BUSY_HINT } from "@/lib/sheet-import-busy-message";
 
 type VendorRow = { id: string; companyName: string; siteUrl: string };
 type ClientRow = { id: string; companyName: string; siteUrl: string };
@@ -94,24 +98,36 @@ export function EmailListNewWizardPage() {
   const qc = useQueryClient();
   const { showAlert } = useAppDialog();
   const [staged, setStaged] = useState<Staged[]>([]);
-  const [importKind, setImportKind] = useState<"menu" | "csv" | "sheet" | "bank" | null>(null);
-  const [csvText, setCsvText] = useState("");
+  const [importKind, setImportKind] = useState<"menu" | "sheet" | "bank" | null>(null);
   const [sheetUrl, setSheetUrl] = useState("");
   const [bankTab, setBankTab] = useState<"vendors" | "clients">("vendors");
   const [bankSel, setBankSel] = useState<Set<string>>(new Set());
   const [saving, setSaving] = useState(false);
+  const csvFileInputRef = useRef<HTMLInputElement>(null);
+  const sheetPreview = useSheetPreview(sheetUrl, token, importKind === "sheet");
+
+  useEffect(() => {
+    if (importKind == null) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, [importKind]);
 
   const vendorsQ = useQuery({
     queryKey: ["vendors-pending-import", userKey],
     queryFn: () =>
       apiFetch<{ data: VendorRow[]; total: number }>("/vendors?dealStatus=PENDING&limit=200", token),
     enabled: status === "authenticated" && !!token && !!userKey && importKind === "bank" && bankTab === "vendors",
+    staleTime: 60_000,
   });
 
   const clientsQ = useQuery({
     queryKey: ["clients-import", userKey],
     queryFn: () => apiFetch<{ data: ClientRow[]; total: number }>("/clients?limit=200", token),
     enabled: status === "authenticated" && !!token && !!userKey && importKind === "bank" && bankTab === "clients",
+    staleTime: 60_000,
   });
 
   const canSave = staged.length > 0;
@@ -138,19 +154,14 @@ export function EmailListNewWizardPage() {
     );
   }
 
-  function stageCsv() {
-    const c = csvText.trim();
+  function stageCsvFromText(raw: string, label: string) {
+    const c = raw.trim();
     if (!c) {
-      void showAlert("Paste CSV content first.");
+      void showAlert("CSV is empty.");
       return;
     }
     const id = newId();
-    const lines = c.split(/\r?\n/).filter((l) => l.trim()).length;
-    setStaged((s) => [
-      ...s,
-      { id, t: "csv", csv: csvText, label: `CSV · ~${lines} line(s)` },
-    ]);
-    setCsvText("");
+    setStaged((s) => [...s, { id, t: "csv", csv: raw, label }]);
     setImportKind(null);
   }
 
@@ -197,15 +208,15 @@ export function EmailListNewWizardPage() {
       });
       for (const op of staged) {
         if (op.t === "csv" && op.csv != null) {
-          await apiFetch(`/email-marketing/lists/${list.id}/import/csv`, token, {
-            method: "POST",
-            body: JSON.stringify({ csv: op.csv }),
+          const r = await postImportExport(`/email-marketing/lists/${list.id}/import/csv`, token, {
+            csv: op.csv,
           });
+          if (!r.ok) throw new Error(r.message);
         } else if (op.t === "sheet" && op.url) {
-          await apiFetch(`/email-marketing/lists/${list.id}/import/sheet`, token, {
-            method: "POST",
-            body: JSON.stringify({ url: op.url }),
+          const r = await postImportExport(`/email-marketing/lists/${list.id}/import/sheet`, token, {
+            url: op.url,
           });
+          if (!r.ok) throw new Error(r.message);
         } else if (op.t === "vendors" && op.ids?.length) {
           await apiFetch(`/email-marketing/lists/${list.id}/import/vendors`, token, {
             method: "POST",
@@ -251,6 +262,27 @@ export function EmailListNewWizardPage() {
         <p className="text-sm text-slate-700 dark:text-slate-200">
           Add at least one import below. You can stage multiple imports; they are applied in order when you save.
         </p>
+        <input
+          ref={csvFileInputRef}
+          type="file"
+          accept=".csv,text/csv,text/plain"
+          className="hidden"
+          aria-hidden
+          onChange={(e) => {
+            const input = e.target;
+            const f = input.files?.[0];
+            input.value = "";
+            if (!f) return;
+            const reader = new FileReader();
+            reader.onload = () => {
+              const text = typeof reader.result === "string" ? reader.result : "";
+              const lines = text.split(/\r?\n/).filter((l) => l.trim()).length;
+              stageCsvFromText(text, `CSV · ${f.name} · ~${lines} line(s)`);
+            };
+            reader.onerror = () => void showAlert("Could not read the file.");
+            reader.readAsText(f);
+          }}
+        />
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <button type="button" className="btn-toolbar-outline" onClick={() => setImportKind("menu")}>
             <Upload className="h-4 w-4 text-brand-600 dark:text-cyan-400" />
@@ -281,22 +313,36 @@ export function EmailListNewWizardPage() {
         )}
       </div>
 
-      <div className="flex flex-wrap items-center justify-end gap-3">
-        <button
-          type="button"
-          className="text-sm font-medium text-slate-600 transition hover:underline dark:text-slate-400"
-          onClick={() => router.push("/email-marketing/lists")}
-        >
-          Cancel
-        </button>
-        <button
-          type="button"
-          className="btn-save-primary-sm"
-          disabled={!canSave || saving}
-          onClick={() => void onSave()}
-        >
-          {saving ? "Saving…" : "Save"}
-        </button>
+      <div className="flex flex-col items-end gap-2">
+        <div className="flex flex-wrap items-center justify-end gap-3">
+          <button
+            type="button"
+            className="text-sm font-medium text-slate-600 transition hover:underline dark:text-slate-400"
+            onClick={() => router.push("/email-marketing/lists")}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="btn-save-primary-sm"
+            disabled={!canSave || saving}
+            onClick={() => void onSave()}
+          >
+            {saving ? (
+              <span className="inline-flex items-center gap-1.5">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                Saving…
+              </span>
+            ) : (
+              "Save"
+            )}
+          </button>
+        </div>
+        {saving && staged.some((s) => s.t === "sheet") ? (
+          <p className="max-w-md text-right text-[11px] leading-relaxed text-slate-500 dark:text-slate-400">
+            {SHEET_IMPORT_BUSY_HINT}
+          </p>
+        ) : null}
       </div>
 
       {importKind === "menu" ? (
@@ -307,9 +353,12 @@ export function EmailListNewWizardPage() {
               <button
                 type="button"
                 className="rounded-xl border border-slate-200 py-2 px-4 text-left dark:border-slate-600"
-                onClick={() => setImportKind("csv")}
+                onClick={() => {
+                  setImportKind(null);
+                  window.setTimeout(() => csvFileInputRef.current?.click(), 0);
+                }}
               >
-                Upload CSV
+                Upload CSV file…
               </button>
               <button
                 type="button"
@@ -333,45 +382,43 @@ export function EmailListNewWizardPage() {
         </div>
       ) : null}
 
-      {importKind === "csv" ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-          <div className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-2xl bg-white p-6 dark:bg-slate-800">
-            <h2 className="text-lg font-semibold">Import CSV</h2>
-            <p className="mt-2 text-xs text-slate-500">Paste CSV with headers (site_url, company_name, emails, …).</p>
-            <textarea
-              className="mt-3 h-48 w-full rounded-lg border border-slate-200 p-2 font-mono text-xs dark:border-slate-600 dark:bg-slate-800"
-              value={csvText}
-              onChange={(e) => setCsvText(e.target.value)}
-            />
-            <div className="mt-4 flex justify-end gap-2">
-              <button type="button" onClick={() => setImportKind("menu")}>
-                Back
-              </button>
-              <button type="button" className="btn-save-primary-sm" onClick={stageCsv}>
-                Add to import queue
+      {importKind === "sheet" ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center overflow-hidden bg-black/40 p-4">
+          <div className="flex max-h-[min(88vh,calc(100dvh-2rem))] w-full max-w-lg flex-col overflow-hidden rounded-2xl bg-white shadow-xl dark:bg-slate-800">
+            <div className="flex shrink-0 items-start justify-between gap-2 border-b border-slate-100 px-5 pb-3 pt-4 dark:border-slate-700">
+              <h2 className="text-lg font-semibold">Google Sheet</h2>
+              <button
+                type="button"
+                className="shrink-0 rounded-lg p-1.5 text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
+                aria-label="Close"
+                onClick={() => setImportKind(null)}
+              >
+                <X className="h-4 w-4" />
               </button>
             </div>
-          </div>
-        </div>
-      ) : null}
-
-      {importKind === "sheet" ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-          <div className="w-full max-w-md rounded-2xl bg-white p-6 dark:bg-slate-800">
-            <h2 className="text-lg font-semibold">Google Sheet</h2>
-            <input
-              className="mt-3 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-800"
-              placeholder="https://docs.google.com/spreadsheets/d/..."
-              value={sheetUrl}
-              onChange={(e) => setSheetUrl(e.target.value)}
-            />
-            <div className="mt-4 flex justify-end gap-2">
-              <button type="button" onClick={() => setImportKind("menu")}>
-                Back
-              </button>
-              <button type="button" className="btn-save-primary-sm" onClick={stageSheet}>
-                Add to import queue
-              </button>
+            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 py-4">
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                Share the sheet as &quot;Anyone with the link&quot; (viewer). Columns load automatically from the first row.
+              </p>
+              <input
+                className="mt-3 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-800"
+                placeholder="https://docs.google.com/spreadsheets/d/..."
+                value={sheetUrl}
+                onChange={(e) => setSheetUrl(e.target.value)}
+              />
+              <SheetPreviewPanel
+                loading={sheetPreview.loading}
+                error={sheetPreview.error}
+                data={sheetPreview.data}
+              />
+              <div className="mt-4 flex justify-end gap-2">
+                <button type="button" onClick={() => setImportKind("menu")}>
+                  Back
+                </button>
+                <button type="button" className="btn-save-primary-sm" onClick={stageSheet}>
+                  Add to import queue
+                </button>
+              </div>
             </div>
           </div>
         </div>

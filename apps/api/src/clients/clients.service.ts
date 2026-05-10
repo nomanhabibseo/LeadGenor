@@ -2,8 +2,30 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { OrderStatus, Prisma } from '@prisma/client';
 import { normalizeSiteUrl } from '@leadgenor/shared';
 import { joinEmails, parseEmails } from '../common/multi-email';
+import { websiteNameFromSiteUrl } from '../common/website-name-from-url';
 import { PrismaService } from '../prisma/prisma.service';
 import { ClientBodyDto } from './dto/client-body.dto';
+
+export type ClientListFilters = {
+  searchUrl?: string;
+  drMin?: number;
+  drMax?: number;
+  trafficMin?: number;
+  trafficMax?: number;
+  nicheIds?: string[];
+  nicheMode?: 'include' | 'exclude';
+  countryIds?: string[];
+  countryMode?: 'include' | 'exclude';
+  languageId?: string;
+  mozDaMin?: number;
+  mozDaMax?: number;
+  authorityScoreMin?: number;
+  authorityScoreMax?: number;
+  referringDomainsMin?: number;
+  referringDomainsMax?: number;
+  backlinksMin?: number;
+  backlinksMax?: number;
+};
 
 @Injectable()
 export class ClientsService {
@@ -28,15 +50,6 @@ export class ClientsService {
     } as const;
   }
 
-  private hostFromSiteUrl(siteUrl: string): string {
-    try {
-      const u = siteUrl.trim().startsWith('http') ? siteUrl.trim() : `https://${siteUrl.trim()}`;
-      return new URL(u).hostname.replace(/^www\./, '');
-    } catch {
-      return 'Site';
-    }
-  }
-
   private async defaultLanguageId(): Promise<string> {
     const en = await this.prisma.language.findFirst({
       where: { code: { equals: 'en', mode: 'insensitive' } },
@@ -51,9 +64,9 @@ export class ClientsService {
     const emails = parseEmails(dto.email);
     if (!emails.length) throw new BadRequestException('At least one valid email is required.');
     const email = joinEmails(emails);
-    const host = this.hostFromSiteUrl(dto.siteUrl);
-    const companyName = (dto.companyName?.trim() || host).slice(0, 240);
-    const clientName = (dto.clientName?.trim() || host).slice(0, 240);
+    const derivedSiteLabel = websiteNameFromSiteUrl(dto.siteUrl) || 'Site';
+    const companyName = (dto.companyName?.trim() || derivedSiteLabel).slice(0, 240);
+    const clientName = (dto.clientName?.trim() || derivedSiteLabel).slice(0, 240);
     const languageId = dto.languageId?.trim() || (await this.defaultLanguageId());
     return {
       companyName,
@@ -128,6 +141,33 @@ export class ClientsService {
     });
   }
 
+  /** Same inserts as {@link createAnyway}, without nested reads — optimized for CSV/sheet imports. */
+  async createAnywayForImport(userId: string, dto: ClientBodyDto) {
+    const n = await this.normalizeClientBody(dto);
+    const siteUrlNormalized = normalizeSiteUrl(n.siteUrl);
+    await this.prisma.client.create({
+      data: {
+        userId,
+        companyName: n.companyName,
+        clientName: n.clientName,
+        siteUrl: n.siteUrl,
+        siteUrlNormalized,
+        traffic: n.traffic,
+        dr: n.dr,
+        mozDa: n.mozDa,
+        authorityScore: n.authorityScore,
+        referringDomains: n.referringDomains,
+        backlinks: n.backlinks,
+        email: n.email,
+        whatsapp: n.whatsapp,
+        languageId: n.languageId,
+        niches: { create: n.nicheIds.map((nicheId) => ({ nicheId })) },
+        countries: { create: n.countryIds.map((countryId) => ({ countryId })) },
+      },
+      select: { id: true },
+    });
+  }
+
   async update(userId: string, id: string, dto: ClientBodyDto) {
     const n = await this.normalizeClientBody(dto);
     const siteUrlNormalized = normalizeSiteUrl(n.siteUrl);
@@ -176,32 +216,7 @@ export class ClientsService {
     return c;
   }
 
-  async list(
-    userId: string,
-    scope: 'active' | 'trash',
-    q: {
-      page: number;
-      limit: number;
-      searchUrl?: string;
-      drMin?: number;
-      drMax?: number;
-      trafficMin?: number;
-      trafficMax?: number;
-      nicheIds?: string[];
-      nicheMode?: 'include' | 'exclude';
-      countryIds?: string[];
-      countryMode?: 'include' | 'exclude';
-      languageId?: string;
-      mozDaMin?: number;
-      mozDaMax?: number;
-      authorityScoreMin?: number;
-      authorityScoreMax?: number;
-      referringDomainsMin?: number;
-      referringDomainsMax?: number;
-      backlinksMin?: number;
-      backlinksMax?: number;
-    },
-  ) {
+  private buildClientListWhere(userId: string, scope: 'active' | 'trash', q: ClientListFilters): Prisma.ClientWhereInput {
     const where: Prisma.ClientWhereInput = { userId };
     if (scope === 'trash') where.deletedAt = { not: null };
     else where.deletedAt = null;
@@ -257,9 +272,19 @@ export class ClientsService {
       if (q.backlinksMin != null) where.backlinks.gte = q.backlinksMin;
       if (q.backlinksMax != null) where.backlinks.lte = q.backlinksMax;
     }
+    return where;
+  }
 
+  private async getClientSortedIds(
+    userId: string,
+    where: Prisma.ClientWhereInput,
+  ): Promise<{
+    total: number;
+    sortedIds: string[];
+    truncated: boolean;
+    countMap: Map<string, number>;
+  }> {
     const total = await this.prisma.client.count({ where });
-
     const MAX_SORT_SCAN = 2000;
     const all = await this.prisma.client.findMany({
       where,
@@ -277,17 +302,35 @@ export class ClientsService {
             _count: { _all: true },
           });
     const countMap = new Map(countsAll.map((c) => [c.clientId, c._count._all]));
-
     const sorted = [...all].sort((a, b) => {
       const ca = countMap.get(a.id) ?? 0;
       const cb = countMap.get(b.id) ?? 0;
       if (ca !== cb) return cb - ca;
       return b.updatedAt.getTime() - a.updatedAt.getTime();
     });
+    return {
+      total,
+      sortedIds: sorted.map((r) => r.id),
+      truncated: total > sorted.length,
+      countMap,
+    };
+  }
 
-    const pageIds = sorted
-      .slice((q.page - 1) * q.limit, (q.page - 1) * q.limit + q.limit)
-      .map((r) => r.id);
+  async listIds(userId: string, scope: 'active' | 'trash', q: ClientListFilters) {
+    const where = this.buildClientListWhere(userId, scope, q);
+    const { total, sortedIds, truncated } = await this.getClientSortedIds(userId, where);
+    return { ids: sortedIds, total, truncated };
+  }
+
+  async list(
+    userId: string,
+    scope: 'active' | 'trash',
+    q: ClientListFilters & { page: number; limit: number },
+  ) {
+    const where = this.buildClientListWhere(userId, scope, q);
+    const { total, sortedIds, countMap } = await this.getClientSortedIds(userId, where);
+
+    const pageIds = sortedIds.slice((q.page - 1) * q.limit, (q.page - 1) * q.limit + q.limit);
     const rows =
       pageIds.length === 0
         ? []
@@ -305,6 +348,16 @@ export class ClientsService {
       }));
 
     return { data, total, page: q.page, limit: q.limit };
+  }
+
+  async softDeleteMany(userId: string, ids: string[]) {
+    const uniq = [...new Set(ids)].filter(Boolean);
+    if (!uniq.length) return { deleted: 0 };
+    const res = await this.prisma.client.updateMany({
+      where: { userId, id: { in: uniq }, deletedAt: null },
+      data: { deletedAt: new Date() },
+    });
+    return { deleted: res.count };
   }
 
   async softDelete(userId: string, id: string) {
@@ -328,7 +381,23 @@ export class ClientsService {
   }
 
   async permanentDelete(userId: string, id: string) {
-    await this.prisma.client.delete({ where: { id, userId } });
+    await this.prisma.$transaction(async (tx) => {
+      await tx.order.deleteMany({ where: { userId, clientId: id } });
+      await tx.client.delete({ where: { id, userId } });
+    });
     return { ok: true };
+  }
+
+  /** Orders reference clients with onDelete: Restrict — remove those orders first. */
+  async permanentDeleteMany(userId: string, ids: string[]) {
+    const uniq = [...new Set(ids)].filter(Boolean);
+    if (!uniq.length) return { deleted: 0 };
+    return this.prisma.$transaction(async (tx) => {
+      await tx.order.deleteMany({ where: { userId, clientId: { in: uniq } } });
+      const res = await tx.client.deleteMany({
+        where: { userId, id: { in: uniq }, deletedAt: { not: null } },
+      });
+      return { deleted: res.count };
+    });
   }
 }

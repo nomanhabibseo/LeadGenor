@@ -8,12 +8,15 @@ import { CalendarRange, ChevronDown, ExternalLink, Plus } from "lucide-react";
 import { useAppDialog } from "@/contexts/app-dialog-context";
 import { apiFetch, apiUrl } from "@/lib/api";
 import { ExportFormatMenu, type ExportChunk } from "@/components/export-format-menu";
+import { DataTableEmptyRow, DataTableLoadingRow } from "@/components/data-table-loading-empty";
 import { TablePagination } from "@/components/table-pagination";
 import { OrderStatusTablePill } from "@/components/table-status-badges";
 import { DataTableRowMenu, type RowMenuItem } from "@/components/data-table-row-menu";
 import { cn } from "@/lib/utils";
 
-const DEFAULT_LIST_LIMIT = 20;
+const DEFAULT_LIST_LIMIT = 100;
+
+const ORDER_TABLE_COL_SPAN = 9;
 
 type OrderRow = {
   id: string;
@@ -77,6 +80,28 @@ function buildOrdersUrl(
   return `/orders?${qs.toString()}`;
 }
 
+function buildOrdersIdsUrl(
+  scope: OrderScope,
+  searchUrl: string,
+  dateFrom: string,
+  dateTo: string,
+) {
+  const qs = new URLSearchParams();
+  const scopeParam =
+    scope === "completed"
+      ? "completed"
+      : scope === "pending"
+        ? "pending"
+        : scope === "trash"
+          ? "trash"
+          : "all";
+  qs.set("scope", scopeParam);
+  if (searchUrl.trim()) qs.set("searchUrl", searchUrl.trim());
+  if (dateFrom.trim()) qs.set("dateFrom", dateFrom.trim());
+  if (dateTo.trim()) qs.set("dateTo", dateTo.trim());
+  return `/orders/ids?${qs.toString()}`;
+}
+
 export function OrderTable({
   scope,
   title,
@@ -90,8 +115,9 @@ export function OrderTable({
   const { showAlert, showConfirm } = useAppDialog();
   const [searchUrl, setSearchUrl] = useState("");
   const [page, setPage] = useState(1);
-  const listLimit = DEFAULT_LIST_LIMIT;
+  const [listLimit, setListLimit] = useState(DEFAULT_LIST_LIMIT);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [selectAllLoading, setSelectAllLoading] = useState(false);
   const [dateOpen, setDateOpen] = useState(false);
   const [draftFrom, setDraftFrom] = useState("");
   const [draftTo, setDraftTo] = useState("");
@@ -133,6 +159,13 @@ export function OrderTable({
   const from = total === 0 ? 0 : (page - 1) * limit + 1;
   const to = Math.min(page * limit, total);
 
+  const orderEmptyMessage = useMemo(() => {
+    if (isTrash) return "This page is empty. There are no orders in trash.";
+    if (scope === "completed") return "This page is empty. No completed orders in this view.";
+    if (scope === "pending") return "This page is empty. No pending orders in this view.";
+    return "This page is empty. No orders in this view—create orders to see rows here.";
+  }, [scope, isTrash]);
+
   const allIds = useMemo(() => rows.map((r) => r.id), [rows]);
 
   const dateFilterActive = Boolean(appliedFrom.trim() || appliedTo.trim());
@@ -155,8 +188,25 @@ export function OrderTable({
   }, []);
 
   function toggleAll() {
-    if (selected.size === allIds.length) setSelected(new Set());
+    if (allIds.length > 0 && allIds.every((id) => selected.has(id))) setSelected(new Set());
     else setSelected(new Set(allIds));
+  }
+
+  async function selectAllMatching() {
+    if (!token || total === 0) return;
+    setSelectAllLoading(true);
+    try {
+      const url = buildOrdersIdsUrl(scope, searchUrl, appliedFrom, appliedTo);
+      const res = await apiFetch<{ ids: string[]; total: number; truncated: boolean }>(url, token);
+      setSelected(new Set(res.ids));
+      if (res.truncated) {
+        void showAlert(
+          `Only the first ${res.ids.length} matching orders can be selected at once. Total matching: ${res.total}. Narrow filters or date range if you need a smaller set.`,
+        );
+      }
+    } finally {
+      setSelectAllLoading(false);
+    }
   }
 
   const exportIds = useMemo(() => {
@@ -299,18 +349,18 @@ export function OrderTable({
     });
     setSelected(new Set());
 
-    const results = await Promise.allSettled(
-      ids.map((id) =>
-        fetch(apiUrl(`/orders/${id}`), {
-          method: "DELETE",
-          headers: { Authorization: `Bearer ${token}` },
-        }),
-      ),
-    );
-    const failed = results.filter((r) => r.status !== "fulfilled" || !r.value.ok);
-    if (failed.length) {
+    const bulkRes = await fetch(apiUrl("/orders/bulk-soft-delete"), {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ ids }),
+    });
+    if (!bulkRes.ok) {
       snapshots.forEach(([key, data]) => qc.setQueryData(key, data));
-      void showAlert(`Could not delete ${failed.length} row(s). Please try again.`);
+      void showAlert((await bulkRes.text()) || "Could not delete selected rows.");
+      return;
     }
     void qc.invalidateQueries({ queryKey: ["orders"] });
     void qc.invalidateQueries({ queryKey: ["stats"] });
@@ -320,11 +370,17 @@ export function OrderTable({
     if (!ids.length) return;
     if (!token) return;
     if (!(await showConfirm(`Permanently delete ${ids.length} order(s)? This cannot be undone.`))) return;
-    for (const id of ids) {
-      await fetch(apiUrl(`/orders/${id}/permanent`), {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` },
-      });
+    const res = await fetch(apiUrl("/orders/bulk-permanent-delete"), {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ ids }),
+    });
+    if (!res.ok) {
+      void showAlert((await res.text()) || "Could not delete selected orders.");
+      return;
     }
     setSelected(new Set());
     void qc.invalidateQueries({ queryKey: ["orders"] });
@@ -401,6 +457,16 @@ export function OrderTable({
           {title}
         </h1>
         <div className="flex flex-wrap items-center justify-end gap-2">
+          {total > 0 ? (
+            <button
+              type="button"
+              className="btn-toolbar-outline"
+              disabled={selectAllLoading}
+              onClick={() => void selectAllMatching()}
+            >
+              {selectAllLoading ? "Loading…" : `Select all matching (${total.toLocaleString()})`}
+            </button>
+          ) : null}
           {!isTrash && selected.size > 0 ? (
             <button
               type="button"
@@ -580,8 +646,6 @@ export function OrderTable({
         </div>
       ) : null}
 
-      {isLoading && <p className="mt-4">Loading…</p>}
-
       <div className="data-table-shell mt-4">
         <table className="min-w-full text-center text-[11px]">
           <thead className="data-table-thead">
@@ -589,10 +653,10 @@ export function OrderTable({
               <th className="w-10 p-2.5 align-middle">
                 <input
                   type="checkbox"
+                  title="Select rows on this page"
                   className="mx-auto block"
-                  checked={
-                    allIds.length > 0 && selected.size === allIds.length
-                  }
+                  disabled={isLoading}
+                  checked={allIds.length > 0 && allIds.every((id) => selected.has(id))}
                   onChange={toggleAll}
                 />
               </th>
@@ -607,7 +671,13 @@ export function OrderTable({
             </tr>
           </thead>
           <tbody>
-            {rows.map((r, rowIdx) => {
+            {isLoading ? (
+              <DataTableLoadingRow colSpan={ORDER_TABLE_COL_SPAN} />
+            ) : rows.length === 0 ? (
+              <DataTableEmptyRow colSpan={ORDER_TABLE_COL_SPAN} message={orderEmptyMessage} />
+            ) : null}
+            {!isLoading && rows.length > 0
+              ? rows.map((r, rowIdx) => {
               const tp =
                 typeof r.totalPayment === "object"
                   ? r.totalPayment.toString()
@@ -719,18 +789,23 @@ export function OrderTable({
                   </td>
                 </tr>
               );
-            })}
+              })
+              : null}
           </tbody>
         </table>
       </div>
 
-      <TablePagination
-        page={page}
-        totalPages={totalPages}
-        limit={limit}
-        onPageChange={setPage}
-        showLimitSelect={false}
-      />
+      {!isLoading ? (
+        <TablePagination
+          page={page}
+          totalPages={totalPages}
+          limit={limit}
+          onPageChange={setPage}
+          onLimitChange={setListLimit}
+          limitOptions={[50, 100, 200]}
+          showLimitSelect={false}
+        />
+      ) : null}
     </div>
   );
 }

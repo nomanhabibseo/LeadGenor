@@ -203,6 +203,45 @@ export class EmailTemplatesService {
     return { ok: true };
   }
 
+  /**
+   * Hard-delete a folder that is already in trash (cascades templates).
+   * Any campaign referencing a template inside this folder is removed first (same idea as permanent list delete).
+   */
+  async permanentDeleteFolderFromTrash(userId: string, folderId: string) {
+    const folder = await this.prisma.templateFolder.findFirst({
+      where: { id: folderId, userId, deletedAt: { not: null } },
+    });
+    if (!folder) throw new NotFoundException('Folder not found in trash.');
+
+    const templates = await this.prisma.emailTemplate.findMany({
+      where: { folderId, userId },
+      select: { id: true },
+    });
+    const doomed = new Set(templates.map((t) => t.id));
+
+    if (doomed.size > 0) {
+      const campaigns = await this.prisma.campaign.findMany({
+        where: { userId },
+        select: { id: true, mainSequence: true, followUpSequence: true, mainFlowGraph: true },
+      });
+      const campaignIds = new Set<string>();
+      for (const c of campaigns) {
+        for (const tid of templateIdsUsedInCampaign(c)) {
+          if (doomed.has(tid)) {
+            campaignIds.add(c.id);
+            break;
+          }
+        }
+      }
+      if (campaignIds.size > 0) {
+        await this.prisma.campaign.deleteMany({ where: { id: { in: [...campaignIds] } } });
+      }
+    }
+
+    await this.prisma.templateFolder.delete({ where: { id: folderId } });
+    return { ok: true };
+  }
+
   async listTemplates(userId: string, folderId: string, search?: string) {
     const folder = await this.prisma.templateFolder.findFirst({
       where: { id: folderId, userId, deletedAt: null },

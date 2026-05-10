@@ -1,14 +1,20 @@
 import * as Papa from 'papaparse';
 import { normalizeSiteUrl } from '@leadgenor/shared';
 import { ListContactKind, EmailRiskLevel } from '@prisma/client';
+import { parseAbbreviatedMetricInt } from '../common/parse-abbreviated-metric-int';
+import { websiteNameFromSiteUrl } from '../common/website-name-from-url';
 
-function normHeader(k: string) {
+/** Exported for sheet preview / import tooling (matches CSV parsing aliases). */
+export function normHeader(k: string) {
   return k
     .replace(/^\uFEFF/, '')
     .trim()
+    .normalize('NFKC')
     .toLowerCase()
-    .replace(/\s+/g, '_')
-    .replace(/[()]/g, '');
+    /** Slashes etc. (e.g. Ahrefs “Ref. domains / IPs”) become one token prefix. */
+    .replace(/\W+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_|_$/g, '');
 }
 
 function cell(row: Record<string, string>, ...aliases: string[]): string {
@@ -75,11 +81,7 @@ export function parseEmailListCsv(csv: string): { rows: ParsedListRow[]; errors:
     const siteUrlNormalized = normalizeSiteUrl(siteUrl);
     let companyName = cell(row, 'company_name', 'company');
     if (!companyName) {
-      try {
-        companyName = new URL(siteUrl).hostname.replace(/^www\./, '');
-      } catch {
-        companyName = 'Unknown';
-      }
+      companyName = websiteNameFromSiteUrl(siteUrl) || 'Unknown';
     }
     const kindRaw = cell(row, 'contact_kind', 'type').toLowerCase();
     let contactKind: ListContactKind = ListContactKind.IMPORT;
@@ -100,12 +102,23 @@ export function parseEmailListCsv(csv: string): { rows: ParsedListRow[]; errors:
       contactKind,
       niche: cell(row, 'niche', 'category'),
       country: cell(row, 'country'),
-      traffic: parseIntSafe(cell(row, 'traffic', 'monthly_traffic')),
+      traffic: parseAbbreviatedMetricInt(cell(row, 'traffic', 'monthly_traffic')),
       dr: parseIntSafe(cell(row, 'dr', 'domain_rating')),
       da: parseIntSafe(cell(row, 'da', 'moz_da')),
       authorityScore: parseIntSafe(cell(row, 'authority_score', 'as')),
-      backlinks: parseIntSafe(cell(row, 'backlinks')),
-      referringDomains: parseIntSafe(cell(row, 'referring_domains', 'ref_domains')),
+      backlinks: parseAbbreviatedMetricInt(cell(row, 'backlinks')),
+      referringDomains: parseAbbreviatedMetricInt(
+        cell(
+          row,
+          'referring_domains',
+          'ref_domains',
+          'def_domains',
+          'referring_domain',
+          'ref_domain',
+          'ref_domains_ips',
+          'def_domains_ips',
+        ),
+      ),
       emails,
       emailRisk: EmailRiskLevel.UNKNOWN,
     });

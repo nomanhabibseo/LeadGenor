@@ -1,3 +1,7 @@
+function escapeRegExp(k: string): string {
+  return k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 /** Sample data for template preview (aligned with list / merge-tags). */
 export function sampleMergeVars(): Record<string, string> {
   return {
@@ -13,6 +17,8 @@ export function sampleMergeVars(): Record<string, string> {
     backlinks: "15420",
     referring_domains: "890",
     site_url: "https://example.com/blog",
+    website_name: "example",
+    "website name": "example",
     emails: "contact@example.com, sales@example.com",
     contact_name: "Jane Smith",
   };
@@ -20,8 +26,9 @@ export function sampleMergeVars(): Record<string, string> {
 
 export function applyMergePreview(template: string, vars: Record<string, string>): string {
   let out = template;
-  for (const [k, v] of Object.entries(vars)) {
-    const re = new RegExp(`\\{\\{\\s*${k}\\s*\\}\\}`, "gi");
+  const entries = Object.entries(vars).sort((a, b) => b[0].length - a[0].length);
+  for (const [k, v] of entries) {
+    const re = new RegExp(`\\{\\{\\s*${escapeRegExp(k)}\\s*\\}\\}`, "gi");
     out = out.replace(re, v);
   }
   return out;

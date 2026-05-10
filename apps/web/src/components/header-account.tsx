@@ -35,11 +35,15 @@ export function HeaderAccount({ tone = "dark" }: { tone?: "dark" | "light" }) {
     queryKey: ["users", "me", token],
     queryFn: () => apiFetch<UsersMePayload>("/users/me", token),
     enabled: !!token,
+    staleTime: 60_000,
   });
 
-  const eff = me?.subscription?.effectiveTier;
+  /** API enums sometimes serialize oddly; fall back to root `subscriptionTier` so CTAs never disappear. */
+  const rawTier = me?.subscription?.effectiveTier ?? me?.subscriptionTier ?? "FREE";
+  const eff = String(rawTier).toUpperCase();
+  const tierNorm = eff === "PRO" || eff === "BUSINESS" || eff === "FREE" ? eff : "FREE";
   const tier =
-    eff === "PRO" ? "Pro" : eff === "BUSINESS" ? "Business" : "Free";
+    tierNorm === "PRO" ? "Pro" : tierNorm === "BUSINESS" ? "Business" : "Free";
 
   const { data: unread } = useQuery({
     queryKey: ["notifications-unread", userKey],
@@ -140,44 +144,33 @@ export function HeaderAccount({ tone = "dark" }: { tone?: "dark" | "light" }) {
                   Current plan
                 </p>
                 <p className="mt-1 text-lg font-bold text-slate-900 dark:text-white">{tier}</p>
-                <div className="mt-2 border-t border-slate-200 pt-2 dark:border-slate-700">
-                  {eff === "FREE" ? (
-                    <button
-                      type="button"
-                      className="text-left text-xs font-semibold text-violet-700 underline decoration-violet-400/80 underline-offset-2 hover:text-violet-900 dark:text-violet-300 dark:hover:text-violet-200"
-                      onClick={() => {
-                        openPlansModal();
-                        setOpen(false);
-                      }}
-                    >
-                      Upgrade to Pro
-                    </button>
-                  ) : null}
-                  {eff === "PRO" ? (
-                    <button
-                      type="button"
-                      className="text-left text-xs font-semibold text-violet-700 underline decoration-violet-400/80 underline-offset-2 hover:text-violet-900 dark:text-violet-300 dark:hover:text-violet-200"
-                      onClick={() => {
-                        openPlansModal();
-                        setOpen(false);
-                      }}
-                    >
-                      Upgrade to Business
-                    </button>
-                  ) : null}
-                  {eff === "BUSINESS" ? (
-                    <button
-                      type="button"
-                      className="text-left text-xs font-semibold text-violet-700 underline decoration-violet-400/80 underline-offset-2 hover:text-violet-900 dark:text-violet-300 dark:hover:text-violet-200"
-                      onClick={() => {
-                        openPlansModal();
-                        setOpen(false);
-                      }}
-                    >
-                      See all plans
-                    </button>
-                  ) : null}
-                </div>
+                {tierNorm === "FREE" || tierNorm === "PRO" ? (
+                  <div className="mt-2 border-t border-slate-200 pt-2 dark:border-slate-700">
+                    {tierNorm === "FREE" ? (
+                      <button
+                        type="button"
+                        className="block w-full text-left text-xs font-semibold text-violet-700 underline decoration-violet-400/80 underline-offset-2 hover:text-violet-900 dark:text-violet-300 dark:hover:text-violet-200"
+                        onClick={() => {
+                          openPlansModal();
+                          setOpen(false);
+                        }}
+                      >
+                        Upgrade to Pro
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="block w-full text-left text-xs font-semibold text-violet-700 underline decoration-violet-400/80 underline-offset-2 hover:text-violet-900 dark:text-violet-300 dark:hover:text-violet-200"
+                        onClick={() => {
+                          openPlansModal();
+                          setOpen(false);
+                        }}
+                      >
+                        Upgrade to Business
+                      </button>
+                    )}
+                  </div>
+                ) : null}
               </div>
 
               <label className="block">

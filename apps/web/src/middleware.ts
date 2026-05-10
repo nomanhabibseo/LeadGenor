@@ -2,6 +2,19 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { getToken } from "next-auth/jwt";
 
+/**
+ * Incoming request header set on every middleware `next()` so RSC layouts can build a safe
+ * `/login?callbackUrl=…` fallback (defense-in-depth if Edge token read ever diverges from Node).
+ */
+const CALLBACK_HEADER = "x-lg-callback-url";
+
+function forwardWithCallback(request: NextRequest): NextResponse {
+  const callback = `${request.nextUrl.pathname}${request.nextUrl.search}`;
+  const requestHeaders = new Headers(request.headers);
+  requestHeaders.set(CALLBACK_HEADER, callback);
+  return NextResponse.next({ request: { headers: requestHeaders } });
+}
+
 /** Never gate NextAuth, RSC payloads, or static assets — fixes blank/404 app when session fetch is redirected. */
 function isAlwaysPublic(pathname: string) {
   if (pathname.startsWith("/api")) return true;
@@ -11,24 +24,26 @@ function isAlwaysPublic(pathname: string) {
   return false;
 }
 
-const PUBLIC_EXACT = new Set(["/", "/login", "/register", "/forgot-password", "/onboarding/plan", "/pricing"]);
+/**
+ * Routes that stay reachable without a session. Everything else requires auth
+ * (deep links to vendors, clients, orders, email-marketing, etc. → /login?callbackUrl=…).
+ */
+const PUBLIC_PATHS_EXACT = new Set([
+  "/",
+  "/login",
+  "/register",
+  "/forgot-password",
+  "/pricing",
+  "/privacy",
+  "/terms-conditions",
+  "/contact",
+]);
 
-const PROTECTED_PREFIXES = [
-  "/dashboard",
-  "/admin",
-  "/vendors",
-  "/clients",
-  "/orders",
-  "/revenue",
-  "/trash",
-  "/settings",
-  "/email-marketing",
-  "/reports",
-  "/notifications",
-];
+const PUBLIC_PATH_PREFIXES = ["/blogs"];
 
-function needsAuth(pathname: string) {
-  return PROTECTED_PREFIXES.some((p) => pathname === p || pathname.startsWith(`${p}/`));
+function isPublicRoute(pathname: string) {
+  if (PUBLIC_PATHS_EXACT.has(pathname)) return true;
+  return PUBLIC_PATH_PREFIXES.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`));
 }
 
 export async function middleware(request: NextRequest) {
@@ -52,17 +67,16 @@ export async function middleware(request: NextRequest) {
   }
 
   if (isAlwaysPublic(pathname)) {
-    return NextResponse.next();
+    return forwardWithCallback(request);
   }
-  if (PUBLIC_EXACT.has(pathname)) {
-    return NextResponse.next();
-  }
-  if (!needsAuth(pathname)) {
-    return NextResponse.next();
+  if (isPublicRoute(pathname)) {
+    return forwardWithCallback(request);
   }
 
   const secret = process.env.NEXTAUTH_SECRET;
-  const token = secret ? await getToken({ req: request, secret }) : null;
+  /** Align session cookie name with the actual TLS hop (NextAuth defaults use NEXTAUTH_URL / VERCEL, which can disagree in dev/staging). */
+  const secureCookie = request.nextUrl.protocol === "https:";
+  const token = secret ? await getToken({ req: request, secret, secureCookie }) : null;
 
   if (!secret) {
     console.error("[middleware] NEXTAUTH_SECRET is not set; gated routes redirect to login (token cannot be validated).");
@@ -74,7 +88,7 @@ export async function middleware(request: NextRequest) {
     return NextResponse.redirect(login);
   }
 
-  return NextResponse.next();
+  return forwardWithCallback(request);
 }
 
 export const config = {

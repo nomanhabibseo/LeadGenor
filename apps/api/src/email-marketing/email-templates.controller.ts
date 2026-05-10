@@ -55,6 +55,11 @@ export class EmailTemplatesController {
     return this.templates.restoreFolder(user.userId, id);
   }
 
+  @Delete('folders/:id/permanent')
+  async permanentDeleteFolder(@CurrentUser() user: JwtUser, @Param('id') id: string) {
+    return this.templates.permanentDeleteFolderFromTrash(user.userId, id);
+  }
+
   @Get('folders/:id')
   async getFolder(@CurrentUser() user: JwtUser, @Param('id') id: string) {
     return this.templates.getFolder(user.userId, id);

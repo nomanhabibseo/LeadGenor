@@ -42,7 +42,18 @@ export function EmailTemplateFolderPage({ folderId }: { folderId: string }) {
   const removeTpl = useMutation({
     mutationFn: (id: string) =>
       apiFetch(`/email-marketing/templates/items/${id}`, token, { method: "DELETE" }),
-    onSuccess: () => {
+    onMutate: async (deletedId) => {
+      const qk = ["template-items", userKey, folderId, q] as const;
+      await qc.cancelQueries({ queryKey: qk });
+      const previous = qc.getQueryData<Tpl[]>(qk);
+      qc.setQueryData<Tpl[]>(qk, (old) => (old ?? []).filter((t) => t.id !== deletedId));
+      return { previous };
+    },
+    onError: (_err, _id, ctx) => {
+      const qk = ["template-items", userKey, folderId, q] as const;
+      if (ctx?.previous !== undefined) qc.setQueryData(qk, ctx.previous);
+    },
+    onSettled: () => {
       void invalidateTemplateRelatedQueries(qc, userKey, { folderId });
     },
   });

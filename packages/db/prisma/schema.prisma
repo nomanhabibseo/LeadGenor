@@ -341,6 +341,10 @@ model CampaignRecipient {
   emailListItem   EmailListItem             @relation(fields: [emailListItemId], references: [id], onDelete: Cascade)
   phase           String                    @default("main")
   stepIndex       Int                       @default(0)
+  /** When the anchor email (follow-up v2) was sent; used to schedule wait after that send. */
+  followupAnchorSentAt DateTime?
+  /** follow_ups v2: "yes" = opened branch, "no" = not-opened branch; legacy followup uses null. */
+  followBranch    String?
   nextSendAt      DateTime?
   lastSentAt      DateTime?
   status          CampaignRecipientStatus   @default(PENDING)

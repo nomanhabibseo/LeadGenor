@@ -13,16 +13,19 @@ export function Providers({ children }: { children: React.ReactNode }) {
       new QueryClient({
         defaultOptions: {
           queries: {
-            staleTime: 0,
+            /** Cache-first navigation; reduces duplicate GETs across dashboard + CRM pages. */
+            staleTime: 60_000,
             gcTime: 1000 * 60 * 30,
-            refetchOnWindowFocus: true,
-            retry: 1,
+            refetchOnWindowFocus: false,
+            /** API often starts slightly after Next in dev (`ECONNREFUSED`); keep bounded retries. */
+            retry: (failureCount) => failureCount < 3,
+            retryDelay: (attempt) => Math.min(800 * 2 ** attempt, 8_000),
           },
         },
       }),
   );
   return (
-    <SessionProvider refetchOnWindowFocus>
+    <SessionProvider refetchOnWindowFocus={false}>
       <QueryClientProvider client={client}>
         <ThemeProvider>
           <SmoothHashScrollEffects />

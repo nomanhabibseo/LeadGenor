@@ -10,6 +10,7 @@ import { useAppDialog } from "@/contexts/app-dialog-context";
 import { apiFetch } from "@/lib/api";
 import { invalidateTemplateRelatedQueries } from "@/lib/invalidate-template-queries";
 import { sessionQueryUserKey } from "@/lib/session-query-scope";
+import { ListPageBodyLoading } from "@/components/data-table-loading-empty";
 import { TablePagination } from "@/components/table-pagination";
 
 type Folder = {
@@ -35,12 +36,17 @@ export function EmailTemplatesPage() {
   const [editName, setEditName] = useState("");
   const [listPage, setListPage] = useState(1);
 
-  const { data: folders = [], isError, error, refetch } = useQuery({
+  const { data: foldersRaw, isError, error, refetch, isPending, isFetching } = useQuery({
     queryKey: ["template-folders", userKey, q],
     queryFn: () =>
       apiFetch<Folder[]>(`/email-marketing/templates/folders${q ? `?search=${encodeURIComponent(q)}` : ""}`, token),
     enabled: status === "authenticated" && !!token && !!userKey,
+    staleTime: 30_000,
   });
+  const folders = foldersRaw ?? [];
+  /** First paint after navigation: avoids empty grid flashing before folders load */
+  const foldersInitialLoading =
+    foldersRaw === undefined && !isError && (isPending || isFetching);
 
   const visibleFolders = useMemo(() => folders, [folders]);
 
@@ -145,7 +151,7 @@ export function EmailTemplatesPage() {
             </Link>
           </div>
         </div>
-        {listTotal > 0 || q.trim() ? (
+        {!foldersInitialLoading && (listTotal > 0 || q.trim()) ? (
           <p className="text-xs text-slate-500 dark:text-slate-400">
             <span className="tabular-nums">
               {rangeFrom} - {rangeTo} of {listTotal}
@@ -154,6 +160,9 @@ export function EmailTemplatesPage() {
         ) : null}
       </div>
 
+      {foldersInitialLoading ? (
+        <ListPageBodyLoading message="Loading templates…" />
+      ) : (
       <div className="grid auto-rows-fr items-stretch gap-4 sm:grid-cols-2 xl:grid-cols-3">
         {pagedFolders.map((f) => (
           <div key={f.id} className="em-card em-surface-hover flex h-full min-h-0 flex-col overflow-hidden p-0">
@@ -217,7 +226,9 @@ export function EmailTemplatesPage() {
           </button>
         ) : null}
       </div>
+      )}
 
+      {!foldersInitialLoading ? (
       <TablePagination
         page={listPage}
         totalPages={totalListPages}
@@ -225,8 +236,9 @@ export function EmailTemplatesPage() {
         onPageChange={setListPage}
         showLimitSelect={false}
       />
+      ) : null}
 
-      {q.trim() && sortedFolders.length === 0 ? (
+      {!foldersInitialLoading && q.trim() && sortedFolders.length === 0 ? (
         <p className="text-center text-sm text-slate-500 dark:text-slate-400">No folders match your search.</p>
       ) : null}
 

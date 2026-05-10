@@ -44,15 +44,15 @@ export function DashboardPlansOverlay({
   const choose = useMutation({
     mutationFn: async (planId: PricingPlanId) => {
       await postChoosePlan(token, planId);
+      await qc.invalidateQueries({ queryKey: ["users", "me"] });
       if (planId === "FREE") {
-        router.refresh();
+        await router.refresh();
         return;
       }
       router.push("/onboarding/plan?from=dashboard");
       router.refresh();
     },
-    onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: ["users", "me"] });
+    onSuccess: () => {
       onClose();
     },
     onError: () => {},
@@ -70,7 +70,7 @@ export function DashboardPlansOverlay({
         role="dialog"
         aria-modal="true"
         aria-labelledby="dashboard-plans-title"
-        className="relative mt-8 w-full max-w-6xl rounded-2xl border border-slate-200 bg-[#f4f6fa] p-5 shadow-2xl dark:border-slate-700 dark:bg-slate-950"
+        className="relative mt-6 w-full max-w-5xl rounded-2xl border border-slate-200 bg-[#f4f6fa] p-4 shadow-2xl dark:border-slate-700 dark:bg-slate-950"
         onClick={(e) => e.stopPropagation()}
       >
         <button
@@ -88,7 +88,7 @@ export function DashboardPlansOverlay({
         <div className="pr-12 text-center">
           <h2
             id="dashboard-plans-title"
-            className="text-xl font-bold tracking-tight text-slate-900 dark:text-white sm:text-2xl"
+            className="text-lg font-bold tracking-tight text-slate-900 dark:text-white sm:text-xl"
           >
             Plans &amp; limits
           </h2>
@@ -110,12 +110,13 @@ export function DashboardPlansOverlay({
               ((plan.id === "FREE" && current === "FREE") ||
                 (plan.id === "PRO" && current === "PRO") ||
                 (plan.id === "BUSINESS" && current === "BUSINESS"));
+            const pendingThis = choose.isPending && choose.variables === plan.id;
 
             return (
               <div
                 key={plan.id}
                 className={cn(
-                  "relative flex flex-col rounded-2xl border bg-white p-6 shadow-lg dark:bg-slate-900/95",
+                  "relative flex flex-col rounded-xl border bg-white p-4 shadow-lg dark:bg-slate-900/95",
                   plan.emphasized && !isCurrent
                     ? "border-violet-400/70 ring-2 ring-violet-500/25 dark:border-violet-600/50"
                     : "border-slate-200 dark:border-slate-700/80",
@@ -123,31 +124,27 @@ export function DashboardPlansOverlay({
                   isCurrent && "ring-1 ring-slate-300 dark:ring-slate-600",
                 )}
               >
-                {isCurrent ? (
-                  <span className="absolute -top-3 left-1/2 -translate-x-1/2 rounded-full bg-slate-600 px-4 py-1 text-xs font-bold text-white shadow-md dark:bg-slate-500">
-                    Current plan
-                  </span>
-                ) : plan.emphasized ? (
-                  <span className="absolute -top-3 left-1/2 -translate-x-1/2 rounded-full bg-violet-600 px-4 py-1 text-xs font-bold text-white shadow-md">
+                {plan.emphasized && !isCurrent ? (
+                  <span className="absolute -top-2.5 left-1/2 -translate-x-1/2 rounded-full bg-violet-600 px-3 py-0.5 text-[11px] font-bold text-white shadow-md">
                     Popular
                   </span>
                 ) : null}
 
-                <h3 className="text-lg font-bold text-slate-900 dark:text-white">{plan.title}</h3>
-                <p className="mt-2 text-sm text-slate-600 dark:text-slate-400">{plan.subtitle}</p>
-                <div className="mt-5 flex items-baseline gap-2">
-                  <span className="text-3xl font-bold text-slate-900 dark:text-white">{plan.priceLabel}</span>
+                <h3 className="text-base font-bold text-slate-900 dark:text-white">{plan.title}</h3>
+                <p className="mt-1.5 text-xs text-slate-600 dark:text-slate-400">{plan.subtitle}</p>
+                <div className="mt-3 flex items-baseline gap-2">
+                  <span className="text-2xl font-bold text-slate-900 dark:text-white">{plan.priceLabel}</span>
                   {plan.priceNote ? (
                     <span className="text-sm font-medium text-slate-500 dark:text-slate-400">/{plan.priceNote}</span>
                   ) : null}
                 </div>
 
-                <ul className="mt-6 flex flex-1 flex-col gap-2.5 text-sm text-slate-700 dark:text-slate-200">
+                <ul className="mt-4 flex flex-1 flex-col gap-2 text-xs text-slate-700 dark:text-slate-200">
                   {plan.bullets.slice(0, 6).map((line) => (
-                    <li key={line} className="flex gap-2">
+                    <li key={line} className="flex gap-1.5">
                       <Check
                         className={cn(
-                          "mt-0.5 h-4 w-4 shrink-0",
+                          "mt-0.5 h-3.5 w-3.5 shrink-0",
                           plan.emphasized && !isCurrent
                             ? "text-violet-600 dark:text-violet-400"
                             : "text-emerald-600 dark:text-emerald-400",
@@ -159,13 +156,13 @@ export function DashboardPlansOverlay({
                   ))}
                 </ul>
 
-                <div className="mt-8">
+                <div className="mt-5">
                   <button
                     type="button"
                     disabled={isCurrent || choose.isPending}
                     onClick={() => choose.mutate(plan.id)}
                     className={cn(
-                      "w-full rounded-xl py-3 text-center text-sm font-semibold transition",
+                      "w-full rounded-lg py-2.5 text-center text-xs font-semibold transition",
                       isCurrent
                         ? "cursor-not-allowed border border-slate-300 bg-slate-200/80 text-slate-600 dark:border-slate-600 dark:bg-slate-800/80 dark:text-slate-400"
                         : plan.emphasized
@@ -175,7 +172,7 @@ export function DashboardPlansOverlay({
                   >
                     {isCurrent
                       ? "Current plan"
-                      : choose.isPending
+                      : pendingThis
                         ? "Please wait..."
                         : plan.id === "FREE"
                           ? "Activate Free"

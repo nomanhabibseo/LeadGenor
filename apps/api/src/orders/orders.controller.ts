@@ -1,7 +1,7 @@
 import { Body, Controller, Delete, Get, Param, Post, Put, Query, UseGuards } from '@nestjs/common';
 import { LinkType } from '@prisma/client';
 import { Type } from 'class-transformer';
-import { IsEnum, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
+import { ArrayMaxSize, IsArray, IsEnum, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { CurrentUser, JwtUser } from '../common/decorators/current-user.decorator';
 import { OrderBodyDto } from './dto/order-body.dto';
@@ -19,7 +19,7 @@ class OrderListQuery {
   @IsInt()
   @Min(1)
   @Max(200)
-  limit = 20;
+  limit = 100;
 
   @IsOptional()
   @IsString()
@@ -32,6 +32,13 @@ class OrderListQuery {
   @IsOptional()
   @IsString()
   searchUrl?: string;
+}
+
+class BulkOrderIdsDto {
+  @IsArray()
+  @ArrayMaxSize(10000)
+  @IsString({ each: true })
+  ids!: string[];
 }
 
 @Controller('orders')
@@ -72,9 +79,32 @@ export class OrdersController {
     });
   }
 
+  @Get('ids')
+  listIds(
+    @CurrentUser() user: JwtUser,
+    @Query('scope') scope: 'all' | 'completed' | 'pending' | 'trash' = 'all',
+    @Query() q: OrderListQuery,
+  ) {
+    return this.orders.listIds(user.userId, scope, {
+      dateFrom: q.dateFrom,
+      dateTo: q.dateTo,
+      searchUrl: q.searchUrl,
+    });
+  }
+
   @Post()
   create(@CurrentUser() user: JwtUser, @Body() body: OrderBodyDto) {
     return this.orders.create(user.userId, body);
+  }
+
+  @Post('bulk-soft-delete')
+  bulkSoftDelete(@CurrentUser() user: JwtUser, @Body() body: BulkOrderIdsDto) {
+    return this.orders.softDeleteMany(user.userId, body.ids);
+  }
+
+  @Post('bulk-permanent-delete')
+  bulkPermanentDelete(@CurrentUser() user: JwtUser, @Body() body: BulkOrderIdsDto) {
+    return this.orders.permanentDeleteMany(user.userId, body.ids);
   }
 
   @Get(':id')

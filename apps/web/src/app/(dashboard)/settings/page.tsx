@@ -82,6 +82,7 @@ export default function SettingsPage() {
         trashToggles?: unknown;
       }>("/users/me", token),
     enabled: status === "authenticated" && !!token,
+    staleTime: 60_000,
   });
 
   const [toggles, setToggles] = useState<Record<TrashModuleKey, boolean>>(defaultTrashToggles);

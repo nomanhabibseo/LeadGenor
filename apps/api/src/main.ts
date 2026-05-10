@@ -1,13 +1,17 @@
-import { ValidationPipe } from '@nestjs/common';
+import { Logger, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import { json } from 'express';
 import { AppModule } from './app.module';
 import {
   PrismaClientKnownExceptionFilter,
   PrismaClientValidationExceptionFilter,
 } from './common/filters/prisma-exception.filter';
+import { heavyEmailSchedulersEnabled } from './common/email-schedulers-allow';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  /** Disable Nest’s default JSON parser so we can raise the limit for CSV/sheet imports. */
+  const app = await NestFactory.create(AppModule, { bodyParser: false });
+  app.use(json({ limit: '20mb' }));
   app.useGlobalFilters(new PrismaClientKnownExceptionFilter(), new PrismaClientValidationExceptionFilter());
   app.useGlobalPipes(
     new ValidationPipe({
@@ -40,5 +44,12 @@ async function bootstrap() {
   const port = Number.parseInt(process.env.PORT ?? '4000', 10) || 4000;
   /** Render / Docker: must listen on all interfaces, not only loopback. */
   await app.listen(port, '0.0.0.0');
+  const emailSchedulersOn = heavyEmailSchedulersEnabled();
+  if (!emailSchedulersOn) {
+    const log = new Logger('Bootstrap');
+    log.warn(
+      'Campaign email schedulers are OFF (typical when using `npm run start:dev`). RUNNING campaigns will stay at PENDING until you set ENABLE_EMAIL_SCHEDULERS_IN_DEV=1 in .env and restart the API.',
+    );
+  }
 }
 bootstrap();

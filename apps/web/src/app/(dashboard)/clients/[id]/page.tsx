@@ -6,6 +6,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useSession } from "next-auth/react";
 import { Pencil } from "lucide-react";
 import { apiFetch } from "@/lib/api";
+import { sessionQueryUserKey } from "@/lib/session-query-scope";
 import { FormSectionCard } from "@/components/form-section-card";
 
 type ClientDetail = {
@@ -40,10 +41,12 @@ export default function ClientViewPage() {
   const { id } = useParams();
   const { data: session } = useSession();
   const token = session?.accessToken;
+  const userKey = sessionQueryUserKey(session);
   const { data: c, isLoading } = useQuery({
-    queryKey: ["client", id],
+    queryKey: ["client", userKey, id],
     queryFn: () => apiFetch<ClientDetail>(`/clients/${id}`, token),
-    enabled: !!token && !!id,
+    enabled: !!token && !!id && !!userKey,
+    staleTime: 30_000,
   });
 
   if (isLoading || !c) {

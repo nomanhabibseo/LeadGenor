@@ -39,7 +39,6 @@ export default function NotificationsPage() {
   });
 
   // Fire-and-forget: if it fails, user can still mark items manually.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (status === "authenticated" && token && userKey) void readAll.mutateAsync();
     // we only want this on initial open

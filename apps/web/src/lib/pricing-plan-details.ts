@@ -38,8 +38,8 @@ export const PRICING_PLANS: PricingPlanCard[] = [
       "Mailbox sync: up to 2 sync operations/month",
       "Campaign opened/replied stats hidden (upgrade to unlock)",
     ],
-    ctaLabel: "Create free account",
-    ctaHref: "/register",
+    ctaLabel: "Continue with Free",
+    ctaHref: "/login?callbackUrl=%2Fplans",
   },
   {
     id: "PRO",
@@ -59,8 +59,8 @@ export const PRICING_PLANS: PricingPlanCard[] = [
       "Mailbox sync: unlimited",
       "Full engagement stats (opens, replies, reporting)",
     ],
-    ctaLabel: "Choose Pro (manual payment)",
-    ctaHref: "/onboarding/plan",
+    ctaLabel: "Choose Pro",
+    ctaHref: "/login?callbackUrl=%2Fplans",
   },
   {
     id: "BUSINESS",
@@ -75,7 +75,7 @@ export const PRICING_PLANS: PricingPlanCard[] = [
       "Full reporting & engagement analytics",
       "Manual activation after payment — same login, no new account",
     ],
-    ctaLabel: "Choose Business (manual payment)",
-    ctaHref: "/onboarding/plan",
+    ctaLabel: "Choose Business",
+    ctaHref: "/login?callbackUrl=%2Fplans",
   },
 ];

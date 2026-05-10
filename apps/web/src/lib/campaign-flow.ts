@@ -24,6 +24,62 @@ export type MainFlowStep =
 
 export type ChainStep = { templateId: string; delayDaysBeforeNext: number };
 
+/** Stored in `Campaign.followUpStartRule` when the sequence uses a Follow-Ups condition node. */
+export type FollowUpRuleV2 = {
+  v: 2;
+  waitDays: number;
+  /** 0-based index into main `ChainStep[]` — wait starts after this email is sent. */
+  afterEmailIndex: number;
+  /** Right column in UI: opened but not replied. */
+  yesChain: ChainStep[];
+  /** Left column: not opened. */
+  noChain: ChainStep[];
+};
+
+export function isFollowUpRuleV2(x: unknown): x is FollowUpRuleV2 {
+  if (!x || typeof x !== "object") return false;
+  const o = x as Record<string, unknown>;
+  return (
+    o.v === 2 &&
+    typeof o.waitDays === "number" &&
+    typeof o.afterEmailIndex === "number" &&
+    Array.isArray(o.yesChain) &&
+    Array.isArray(o.noChain)
+  );
+}
+
+/**
+ * Splits the root flow at the first Follow-Ups (`follow_ups`) condition:
+ * - `mainChain` = spine only (emails/delays before the condition).
+ * - `followUp` = compiled yes/no branch chains + wait metadata (v2 rule).
+ * If there is no such condition, returns a single linear `mainChain` and `followUp: null`.
+ */
+export function compileMainFlowForCampaign(steps: MainFlowStep[]): {
+  mainChain: ChainStep[];
+  followUp: FollowUpRuleV2 | null;
+} {
+  const idx = steps.findIndex(
+    (s) => s.t === "condition" && (s as Extract<MainFlowStep, { t: "condition" }>).kind === "follow_ups",
+  );
+  if (idx < 0) {
+    return { mainChain: compileMainFlowToChain(steps), followUp: null };
+  }
+  const spine = steps.slice(0, idx);
+  const cond = steps[idx] as Extract<MainFlowStep, { t: "condition" }>;
+  const mainChain = compileMainFlowToChain(spine).filter((c) => c.templateId);
+  const emailCountInSpine = spine.filter((s) => s.t === "email").length;
+  const rawWait = cond.waitDays ?? 0;
+  const waitDays = Math.min(14, Math.max(1, rawWait < 1 ? 1 : rawWait));
+  const cap = Math.max(0, emailCountInSpine - 1);
+  const afterEmailIndex = Math.min(Math.max(0, cond.afterEmailIndex ?? 0), cap);
+  const yesChain = compileMainFlowToChain(cond.yes ?? []).filter((c) => c.templateId);
+  const noChain = compileMainFlowToChain(cond.no ?? []).filter((c) => c.templateId);
+  return {
+    mainChain,
+    followUp: { v: 2, waitDays, afterEmailIndex, yesChain, noChain },
+  };
+}
+
 export function newFlowId() {
   return `f_${Math.random().toString(36).slice(2, 10)}_${Date.now().toString(36)}`;
 }

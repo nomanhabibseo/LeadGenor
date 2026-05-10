@@ -7,15 +7,17 @@ import {
   Patch,
   Post,
   Query,
+  Req,
   Res,
   UseGuards,
 } from '@nestjs/common';
 import { EmailListAutoUpdate } from '@prisma/client';
-import { Response } from 'express';
+import { Request, Response } from 'express';
 import { Type } from 'class-transformer';
 import { IsArray, ArrayMaxSize, IsEnum, IsOptional, IsString, Max, Min } from 'class-validator';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { CurrentUser, JwtUser } from '../common/decorators/current-user.decorator';
+import { requestImportCancelCheck } from '../import-export/import-stream-hooks';
 import { EmailListsService } from './email-lists.service';
 
 class CreateListDto {
@@ -112,6 +114,11 @@ export class EmailListsController {
     return this.lists.update(user.userId, id, body);
   }
 
+  @Delete(':id/permanent')
+  async permanent(@CurrentUser() user: JwtUser, @Param('id') id: string) {
+    return this.lists.permanentDeleteFromTrash(user.userId, id);
+  }
+
   @Delete(':id')
   async remove(@CurrentUser() user: JwtUser, @Param('id') id: string) {
     return this.lists.softDelete(user.userId, id);
@@ -151,9 +158,67 @@ export class EmailListsController {
     return this.lists.importCsv(user.userId, id, body.csv);
   }
 
+  @Post(':id/import/csv/stream')
+  async importCsvStream(
+    @CurrentUser() user: JwtUser,
+    @Param('id') id: string,
+    @Body() body: ImportCsvDto,
+    @Req() req: Request,
+    @Res({ passthrough: false }) res: Response,
+  ) {
+    const abort = requestImportCancelCheck(req);
+    res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('X-Accel-Buffering', 'no');
+    (res as unknown as { flushHeaders?: () => void }).flushHeaders?.();
+    try {
+      const result = await this.lists.importCsv(user.userId, id, body.csv, {
+        isCancelled: () => abort.isCancelled(),
+        onProgress: (p) => {
+          if (abort.isCancelled()) return;
+          res.write(`${JSON.stringify({ type: 'progress', imported: p.imported, total: p.totalRows })}\n`);
+        },
+      });
+      res.write(`${JSON.stringify({ type: 'done', ...result })}\n`);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      res.write(`${JSON.stringify({ type: 'error', message: msg })}\n`);
+    }
+    res.end();
+  }
+
   @Post(':id/import/sheet')
   async importSheet(@CurrentUser() user: JwtUser, @Param('id') id: string, @Body() body: ImportSheetDto) {
     return this.lists.importSheetUrl(user.userId, id, body.url);
+  }
+
+  @Post(':id/import/sheet/stream')
+  async importSheetStream(
+    @CurrentUser() user: JwtUser,
+    @Param('id') id: string,
+    @Body() body: ImportSheetDto,
+    @Req() req: Request,
+    @Res({ passthrough: false }) res: Response,
+  ) {
+    const abort = requestImportCancelCheck(req);
+    res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('X-Accel-Buffering', 'no');
+    (res as unknown as { flushHeaders?: () => void }).flushHeaders?.();
+    try {
+      const result = await this.lists.importSheetUrl(user.userId, id, body.url, {
+        isCancelled: () => abort.isCancelled(),
+        onProgress: (p) => {
+          if (abort.isCancelled()) return;
+          res.write(`${JSON.stringify({ type: 'progress', imported: p.imported, total: p.totalRows })}\n`);
+        },
+      });
+      res.write(`${JSON.stringify({ type: 'done', ...result })}\n`);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      res.write(`${JSON.stringify({ type: 'error', message: msg })}\n`);
+    }
+    res.end();
   }
 
   @Post(':id/import/vendors')

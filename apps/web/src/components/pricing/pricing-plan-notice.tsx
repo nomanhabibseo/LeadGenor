@@ -6,12 +6,13 @@ import { apiUrl } from "@/lib/api";
 
 type UsersMeLite = { planChosenAt: string | null };
 
-export function PricingPlanNotice() {
+export function PricingPlanNotice({ publicMarketingPage = false }: { publicMarketingPage?: boolean }) {
   const { data: session, status } = useSession();
   const token = session?.accessToken as string | undefined;
   const [planChosenAt, setPlanChosenAt] = useState<string | null>(null);
 
   useEffect(() => {
+    if (publicMarketingPage) return;
     let cancelled = false;
     async function run() {
       if (!token) return;
@@ -31,8 +32,9 @@ export function PricingPlanNotice() {
     return () => {
       cancelled = true;
     };
-  }, [token]);
+  }, [token, publicMarketingPage]);
 
+  if (publicMarketingPage) return null;
   if (status !== "authenticated") return null;
   if (planChosenAt) return null;
 

@@ -22,6 +22,6 @@ export function useReference() {
     queryFn: () => apiFetch<ReferenceData>("/reference", token),
     enabled: !!token,
     retry: 1,
-    staleTime: 60_000,
+    staleTime: 300_000,
   });
 }

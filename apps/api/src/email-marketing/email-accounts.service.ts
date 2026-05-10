@@ -56,17 +56,6 @@ export class EmailAccountsService {
     tag?: string,
   ): Promise<{ displayNameTaken: boolean; tagTaken: boolean }> {
     const out = { displayNameTaken: false, tagTaken: false };
-    const d = displayName?.trim();
-    if (d) {
-      const c = await this.prisma.emailAccount.count({
-        where: {
-          userId,
-          deletedAt: null,
-          displayName: { equals: d, mode: 'insensitive' },
-        },
-      });
-      out.displayNameTaken = c > 0;
-    }
     const t = tag?.trim();
     if (t) {
       const c = await this.prisma.emailAccount.count({
@@ -122,19 +111,6 @@ export class EmailAccountsService {
     const displayTrim = dto.displayName.trim();
     if (!displayTrim) throw new BadRequestException('Display name is required.');
     await this.subscription.assertEmailAccountSlot(userId);
-
-    const dupName = await this.prisma.emailAccount.findFirst({
-      where: {
-        userId,
-        deletedAt: null,
-        displayName: { equals: displayTrim, mode: 'insensitive' },
-      },
-    });
-    if (dupName) {
-      throw new ConflictException(
-        'An account with this display name already exists. Please choose a different display name.',
-      );
-    }
     const hasImap =
       !!(dto.imapHost?.trim() || dto.imapPort || dto.imapUser?.trim() || dto.imapPassword?.trim());
     if (hasImap) {

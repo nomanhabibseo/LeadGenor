@@ -9,6 +9,7 @@ import { CheckCircle2, Pencil, Plus, Search, Trash2 } from "lucide-react";
 import { useAppDialog } from "@/contexts/app-dialog-context";
 import { apiFetch } from "@/lib/api";
 import { sessionQueryUserKey } from "@/lib/session-query-scope";
+import { ListPageBodyLoading } from "@/components/data-table-loading-empty";
 import { TablePagination } from "@/components/table-pagination";
 import { FormSwitch } from "@/components/ui/form-switch";
 
@@ -79,15 +80,19 @@ export function EmailAccountsPage() {
     }
   }, [searchParams]);
 
-  const { data: accounts = [], isError, error, refetch } = useQuery({
+  const { data: accountsRaw, isError, error, refetch, isPending, isFetching } = useQuery({
     queryKey: ["email-accounts", userKey],
     queryFn: () => apiFetch<AccountRow[]>("/email-marketing/accounts", token),
     enabled: status === "authenticated" && !!token && !!userKey,
     retry: 2,
+    staleTime: 15_000,
     /** Keep Sent today / Sent total in sync while campaigns send (UTC counters on the server). */
     refetchInterval: (query) => (query.state.status === "error" ? false : 8_000),
     refetchIntervalInBackground: false,
   });
+  const accounts = accountsRaw ?? [];
+  const accountsInitialLoading =
+    accountsRaw === undefined && !isError && (isPending || isFetching);
 
   const remove = useMutation({
     mutationFn: (id: string) => apiFetch(`/email-marketing/accounts/${id}`, token, { method: "DELETE" }),
@@ -205,7 +210,7 @@ export function EmailAccountsPage() {
             </Link>
           </div>
         </div>
-        {accounts.length > 0 ? (
+        {!accountsInitialLoading && accounts.length > 0 ? (
           <p className="text-xs text-slate-500 dark:text-slate-400">
             <span className="tabular-nums">
               {rangeFrom} - {rangeTo} of {listTotal}
@@ -232,7 +237,9 @@ export function EmailAccountsPage() {
         </div>
       ) : null}
 
-      {accounts.length === 0 ? (
+      {accountsInitialLoading ? (
+        <ListPageBodyLoading message="Loading email accounts…" />
+      ) : accounts.length === 0 ? (
         <div className="em-card py-12 text-center text-slate-600 dark:text-slate-400">
           No email accounts yet. Connect Gmail, Outlook, or SMTP to send campaigns.
         </div>
@@ -255,15 +262,15 @@ export function EmailAccountsPage() {
                       </div>
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                          <span className="text-lg font-semibold text-slate-900 dark:text-white">{a.displayName}</span>
+                          <span className="text-lg font-semibold text-slate-900 dark:text-white">{a.tag}</span>
                           <StatusCell status={a.connectionStatus} />
                         </div>
+                        <p className="mt-0.5 text-sm text-slate-600 dark:text-slate-400">{a.displayName}</p>
                         <p className="mt-0.5 text-sm text-slate-600 dark:text-slate-400">
                           {a.fromEmail}
                           {" · "}
                           {providerLabel(a.provider)}
                         </p>
-                        <p className="mt-1 text-xs text-slate-500">Tag: {a.tag}</p>
                       </div>
                     </div>
 

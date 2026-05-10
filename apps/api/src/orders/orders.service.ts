@@ -163,11 +163,11 @@ export class OrdersService {
     return o;
   }
 
-  async list(
+  private buildOrderListWhere(
     userId: string,
     scope: 'all' | 'completed' | 'pending' | 'trash',
-    q: { page: number; limit: number; dateFrom?: string; dateTo?: string; searchUrl?: string },
-  ) {
+    q: { dateFrom?: string; dateTo?: string; searchUrl?: string },
+  ): Prisma.OrderWhereInput {
     const where: Prisma.OrderWhereInput = { userId };
     if (scope === 'trash') where.deletedAt = { not: null };
     else {
@@ -195,6 +195,36 @@ export class OrdersService {
       };
       where.AND = [...(Array.isArray(where.AND) ? where.AND : where.AND ? [where.AND] : []), searchClause];
     }
+    return where;
+  }
+
+  async listIds(
+    userId: string,
+    scope: 'all' | 'completed' | 'pending' | 'trash',
+    q: { dateFrom?: string; dateTo?: string; searchUrl?: string },
+  ) {
+    const where = this.buildOrderListWhere(userId, scope, q);
+    const total = await this.prisma.order.count({ where });
+    const MAX_IDS = 5000;
+    const rows = await this.prisma.order.findMany({
+      where,
+      select: { id: true },
+      orderBy: { orderDate: 'desc' },
+      take: Math.min(total, MAX_IDS),
+    });
+    return {
+      ids: rows.map((r) => r.id),
+      total,
+      truncated: total > MAX_IDS,
+    };
+  }
+
+  async list(
+    userId: string,
+    scope: 'all' | 'completed' | 'pending' | 'trash',
+    q: { page: number; limit: number; dateFrom?: string; dateTo?: string; searchUrl?: string },
+  ) {
+    const where = this.buildOrderListWhere(userId, scope, q);
 
     const [total, data] = await this.prisma.$transaction([
       this.prisma.order.count({ where }),
@@ -221,34 +251,9 @@ export class OrdersService {
     filters: { dateFrom?: string; dateTo?: string; searchUrl?: string },
     opts: { ids?: string[]; limit: number; offset?: number },
   ) {
-    const where: Prisma.OrderWhereInput = { userId };
-    if (scope === 'trash') where.deletedAt = { not: null };
-    else {
-      where.deletedAt = null;
-      if (scope === 'completed') where.status = OrderStatus.COMPLETED;
-      if (scope === 'pending') where.status = OrderStatus.PENDING;
-    }
+    const where = this.buildOrderListWhere(userId, scope, filters);
     if (opts.ids?.length) {
       where.id = { in: opts.ids };
-    }
-    if (filters.dateFrom || filters.dateTo) {
-      where.orderDate = {};
-      if (filters.dateFrom) where.orderDate.gte = new Date(filters.dateFrom);
-      if (filters.dateTo) {
-        const end = new Date(filters.dateTo);
-        end.setHours(23, 59, 59, 999);
-        where.orderDate.lte = end;
-      }
-    }
-    if (filters.searchUrl?.trim()) {
-      const needle = normalizeSiteUrl(filters.searchUrl).replace(/^https?:\/\//i, '');
-      const searchClause: Prisma.OrderWhereInput = {
-        OR: [
-          { vendor: { siteUrlNormalized: { contains: needle, mode: 'insensitive' } } },
-          { client: { siteUrlNormalized: { contains: needle, mode: 'insensitive' } } },
-        ],
-      };
-      where.AND = [...(Array.isArray(where.AND) ? where.AND : where.AND ? [where.AND] : []), searchClause];
     }
     return this.prisma.order.findMany({
       where,
@@ -270,6 +275,16 @@ export class OrdersService {
     });
   }
 
+  async softDeleteMany(userId: string, ids: string[]) {
+    const uniq = [...new Set(ids)].filter(Boolean);
+    if (!uniq.length) return { deleted: 0 };
+    const res = await this.prisma.order.updateMany({
+      where: { userId, id: { in: uniq }, deletedAt: null },
+      data: { deletedAt: new Date() },
+    });
+    return { deleted: res.count };
+  }
+
   async restoreQuick(userId: string, id: string) {
     const o = await this.prisma.order.findFirst({ where: { id, userId } });
     if (!o?.deletedAt) throw new NotFoundException();
@@ -286,6 +301,15 @@ export class OrdersService {
   async permanentDelete(userId: string, id: string) {
     await this.prisma.order.delete({ where: { id, userId } });
     return { ok: true };
+  }
+
+  async permanentDeleteMany(userId: string, ids: string[]) {
+    const uniq = [...new Set(ids)].filter(Boolean);
+    if (!uniq.length) return { deleted: 0 };
+    const res = await this.prisma.order.deleteMany({
+      where: { userId, id: { in: uniq }, deletedAt: { not: null } },
+    });
+    return { deleted: res.count };
   }
 
   async previewPrice(

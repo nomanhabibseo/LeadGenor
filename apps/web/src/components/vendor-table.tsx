@@ -15,7 +15,14 @@ import {
 } from "lucide-react";
 import { useAppDialog } from "@/contexts/app-dialog-context";
 import { apiFetch, apiUrl } from "@/lib/api";
+import {
+  extractSkippedExistingUrls,
+  formatImportExportResultLines,
+} from "@/lib/post-import-export";
+import { postImportNdjsonStream } from "@/lib/post-import-ndjson-stream";
+import { sessionQueryUserKey } from "@/lib/session-query-scope";
 import { ExportFormatMenu, type ExportChunk } from "@/components/export-format-menu";
+import { DataTableEmptyRow, DataTableLoadingRow } from "@/components/data-table-loading-empty";
 import { TablePagination } from "@/components/table-pagination";
 import { ImportSpreadsheetModal } from "@/components/import-spreadsheet-modal";
 import { useReference } from "@/hooks/use-reference";
@@ -31,7 +38,7 @@ import { CountryFlagsCell } from "@/components/country-flags-cell";
 import { DataTableRowMenu, type RowMenuItem } from "@/components/data-table-row-menu";
 import { TrafficSparkline } from "@/components/traffic-sparkline";
 
-const DEFAULT_LIST_LIMIT = 20;
+const DEFAULT_LIST_LIMIT = 100;
 
 type DealStatus = "DEAL_DONE" | "PENDING";
 
@@ -172,6 +179,33 @@ function buildVendorListUrl(
   return `/vendors?${qs.toString()}`;
 }
 
+/** Same filters as the list; used for "select all matching" (`GET /vendors/ids`). */
+function buildVendorIdsUrl(
+  scope: string,
+  searchUrl: string,
+  f: VendorFilters,
+  scopeAllowsDealFilter: boolean,
+) {
+  const qs = new URLSearchParams();
+  qs.set("scope", scope);
+  if (searchUrl.trim()) qs.set("searchUrl", searchUrl.trim());
+  if (f.nicheId) qs.set("nicheIds", f.nicheId);
+  if (f.countryId) qs.set("countryIds", f.countryId);
+  if (f.languageId) qs.set("languageId", f.languageId);
+  appendRangeParams(qs, "traffic", f.traffic);
+  appendRangeParams(qs, "dr", f.dr);
+  appendRangeParams(qs, "gpPrice", f.gp);
+  appendRangeParams(qs, "nePrice", f.ne);
+  appendRangeParams(qs, "mozDa", f.mozDa);
+  appendRangeParams(qs, "authorityScore", f.as);
+  appendRangeParams(qs, "tatValue", f.tat);
+  appendRangeParams(qs, "ref", f.ref);
+  appendRangeParams(qs, "backlinks", f.backlinks);
+  if (f.paymentTerms) qs.set("paymentTerms", f.paymentTerms);
+  if (scopeAllowsDealFilter && f.dealStatus) qs.set("dealStatus", f.dealStatus);
+  return `/vendors/ids?${qs.toString()}`;
+}
+
 function escHtml(s: string) {
   return s
     .replace(/&/g, "&amp;")
@@ -191,13 +225,15 @@ export function VendorTable({
 }) {
   const { data: session } = useSession();
   const token = session?.accessToken;
+  const userKey = sessionQueryUserKey(session);
   const qc = useQueryClient();
   const { showAlert, showConfirm } = useAppDialog();
   const { data: ref, isLoading: refLoading } = useReference();
   const [searchUrl, setSearchUrl] = useState("");
   const [page, setPage] = useState(1);
-  const listLimit = DEFAULT_LIST_LIMIT;
+  const [listLimit, setListLimit] = useState(DEFAULT_LIST_LIMIT);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [selectAllLoading, setSelectAllLoading] = useState(false);
   const undoBannerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [undoTrashBanner, setUndoTrashBanner] = useState<{ id: string } | null>(null);
   const scopeAllowsDealFilter = scope === "all";
@@ -238,7 +274,23 @@ export function VendorTable({
   const [importOpen, setImportOpen] = useState(false);
   const [sheetUrl, setSheetUrl] = useState("");
   const [importMsg, setImportMsg] = useState<string | null>(null);
+  const [importSkippedDupUrls, setImportSkippedDupUrls] = useState<string[]>([]);
+  const [importBusy, setImportBusy] = useState(false);
+  const [importProgressSummary, setImportProgressSummary] = useState<string | null>(null);
+  const importAbortRef = useRef<AbortController | null>(null);
   const [exportBusy, setExportBusy] = useState(false);
+
+  const prefetchVendorDetail = useCallback(
+    (id: string) => {
+      if (!token || !userKey) return;
+      void qc.prefetchQuery({
+        queryKey: ["vendor", userKey, id],
+        queryFn: () => apiFetch<unknown>(`/vendors/${id}`, token),
+        staleTime: 30_000,
+      });
+    },
+    [qc, token, userKey],
+  );
 
   const listUrl = useMemo(
     () => buildVendorListUrl(scope, page, searchUrl, applied, scopeAllowsDealFilter, listLimit),
@@ -271,6 +323,26 @@ export function VendorTable({
   const to = Math.min(page * limit, total);
 
   const allIds = useMemo(() => rows.map((r) => r.id), [rows]);
+
+  const vendorColSpan = useMemo(() => {
+    let n = 3;
+    if (cols.niche) n++;
+    if (cols.country) n++;
+    if (cols.language) n++;
+    if (cols.traffic) n++;
+    if (cols.dr) n++;
+    if (cols.dealStatus) n++;
+    if (cols.gpPrice) n++;
+    if (cols.actions) n++;
+    return n;
+  }, [cols]);
+
+  const vendorEmptyMessage = useMemo(() => {
+    if (scope === "trash") return "This page is empty. There are no vendors in trash.";
+    if (scope === "deal_done") return "This page is empty. No vendors with deal completed.";
+    if (scope === "pending") return "This page is empty. No vendors with pending deals.";
+    return "This page is empty. No vendors in this view—add or import vendors to see rows here.";
+  }, [scope]);
 
   const openFilterPanel = useCallback(() => {
     setDraft(applied);
@@ -335,8 +407,25 @@ export function VendorTable({
   }
 
   function toggleAll() {
-    if (selected.size === allIds.length) setSelected(new Set());
+    if (allIds.length > 0 && allIds.every((id) => selected.has(id))) setSelected(new Set());
     else setSelected(new Set(allIds));
+  }
+
+  async function selectAllMatching() {
+    if (!token || total === 0) return;
+    setSelectAllLoading(true);
+    try {
+      const url = buildVendorIdsUrl(scope, searchUrl, applied, scopeAllowsDealFilter);
+      const res = await apiFetch<{ ids: string[]; total: number; truncated: boolean }>(url, token);
+      setSelected(new Set(res.ids));
+      if (res.truncated) {
+        void showAlert(
+          `Only the first ${res.ids.length} matching rows can be selected at once (ordering limit). Total matching: ${res.total}. Narrow filters if you need a smaller set.`,
+        );
+      }
+    } finally {
+      setSelectAllLoading(false);
+    }
   }
 
   async function confirmSoftDeleteVendor(id: string) {
@@ -390,18 +479,24 @@ export function VendorTable({
     });
     setSelected(new Set());
 
-    const results = await Promise.allSettled(
-      ids.map((id) =>
-        fetch(apiUrl(`/vendors/${id}`), {
-          method: "DELETE",
-          headers: { Authorization: `Bearer ${token}` },
-        }),
-      ),
-    );
-    const failed = results.filter((r) => r.status !== "fulfilled" || !r.value.ok);
-    if (failed.length) {
+    const res = await fetch(apiUrl("/vendors/bulk-soft-delete"), {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ ids }),
+    });
+    if (!res.ok) {
       snapshots.forEach(([key, data]) => qc.setQueryData(key, data));
-      void showAlert(`Could not delete ${failed.length} row(s). Please try again.`);
+      void showAlert((await res.text()) || "Could not delete selected rows. Please try again.");
+      return;
+    }
+    const j = (await res.json().catch(() => ({}))) as { deleted?: number };
+    if (typeof j.deleted === "number" && j.deleted < ids.length) {
+      void showAlert(
+        `Only ${j.deleted} of ${ids.length} row(s) were moved to trash (others may have already been deleted).`,
+      );
     }
     void qc.invalidateQueries({ queryKey: ["vendors"] });
     void qc.invalidateQueries({ queryKey: ["stats"] });
@@ -482,12 +577,18 @@ export function VendorTable({
   }
 
   async function runPermanentDelete(ids: string[]) {
-    if (!token) return;
-    for (const id of ids) {
-      await fetch(apiUrl(`/vendors/${id}/permanent`), {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` },
-      });
+    if (!token || !ids.length) return;
+    const res = await fetch(apiUrl("/vendors/bulk-permanent-delete"), {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ ids }),
+    });
+    if (!res.ok) {
+      void showAlert((await res.text()) || "Could not delete selected rows.");
+      return;
     }
     setSelected(new Set());
     void qc.invalidateQueries({ queryKey: ["vendors"] });
@@ -496,71 +597,89 @@ export function VendorTable({
 
   async function onImportCsv(file: File | null) {
     setImportMsg(null);
+    setImportSkippedDupUrls([]);
+    setImportProgressSummary(null);
     if (!file || !token) return;
     const text = await file.text();
-    const res = await fetch(apiUrl("/import-export/vendors/csv"), {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({ csv: text }),
-    });
-    const j = (await res.json().catch(() => ({}))) as {
-      message?: string | string[];
-      imported?: number;
-      errors?: string[];
-    };
-    if (!res.ok) {
-      const err = j.message;
-      const textErr = Array.isArray(err) ? err.join(", ") : err;
-      setImportMsg(textErr || "Import failed.");
-      return;
+    importAbortRef.current = new AbortController();
+    const signal = importAbortRef.current.signal;
+    setImportBusy(true);
+    try {
+      const r = await postImportNdjsonStream(
+        "/import-export/vendors/csv/stream",
+        token,
+        { csv: text },
+        {
+          signal,
+          onProgress: ({ imported, total }) => {
+            setImportProgressSummary(
+              total != null && total > 0 ? `Imported ${imported} / ${total}` : `Imported ${imported}`,
+            );
+          },
+        },
+      );
+      if (!r.ok) {
+        if (r.cancelled) {
+          setImportMsg(null);
+          void qc.invalidateQueries({ queryKey: ["vendors"] });
+          void qc.invalidateQueries({ queryKey: ["stats"] });
+          return;
+        }
+        setImportMsg(r.message);
+        return;
+      }
+      setImportMsg(formatImportExportResultLines(r.data));
+      setImportSkippedDupUrls(extractSkippedExistingUrls(r.data));
+      void qc.invalidateQueries({ queryKey: ["vendors"] });
+      void qc.invalidateQueries({ queryKey: ["stats"] });
+    } finally {
+      setImportBusy(false);
+      setImportProgressSummary(null);
+      importAbortRef.current = null;
     }
-    const lines: string[] = [];
-    if (j.imported != null) lines.push(`Imported ${j.imported} vendor(s).`);
-    if (j.message) {
-      if (Array.isArray(j.message)) lines.push(...j.message);
-      else lines.push(j.message);
-    }
-    if (j.errors?.length) lines.push(...j.errors.slice(0, 12));
-    setImportMsg(lines.join("\n") || "Import finished.");
-    void qc.invalidateQueries({ queryKey: ["vendors"] });
-    void qc.invalidateQueries({ queryKey: ["stats"] });
   }
 
   async function onImportFromSheet() {
     setImportMsg(null);
+    setImportSkippedDupUrls([]);
+    setImportProgressSummary(null);
     if (!token || !sheetUrl.trim()) return;
-    const res = await fetch(apiUrl("/import-export/vendors/from-sheet"), {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({ url: sheetUrl.trim() }),
-    });
-    const j = (await res.json().catch(() => ({}))) as {
-      message?: string | string[];
-      imported?: number;
-      errors?: string[];
-    };
-    if (!res.ok) {
-      const err = j.message;
-      const textErr = Array.isArray(err) ? err.join(", ") : err;
-      setImportMsg(textErr || "Could not fetch sheet.");
-      return;
+    importAbortRef.current = new AbortController();
+    const signal = importAbortRef.current.signal;
+    setImportBusy(true);
+    try {
+      const r = await postImportNdjsonStream(
+        "/import-export/vendors/from-sheet/stream",
+        token,
+        { url: sheetUrl.trim() },
+        {
+          signal,
+          onProgress: ({ imported, total }) => {
+            setImportProgressSummary(
+              total != null && total > 0 ? `Imported ${imported} / ${total}` : `Imported ${imported}`,
+            );
+          },
+        },
+      );
+      if (!r.ok) {
+        if (r.cancelled) {
+          setImportMsg(null);
+          void qc.invalidateQueries({ queryKey: ["vendors"] });
+          void qc.invalidateQueries({ queryKey: ["stats"] });
+          return;
+        }
+        setImportMsg(r.message);
+        return;
+      }
+      setImportMsg(formatImportExportResultLines(r.data));
+      setImportSkippedDupUrls(extractSkippedExistingUrls(r.data));
+      void qc.invalidateQueries({ queryKey: ["vendors"] });
+      void qc.invalidateQueries({ queryKey: ["stats"] });
+    } finally {
+      setImportBusy(false);
+      setImportProgressSummary(null);
+      importAbortRef.current = null;
     }
-    const lines: string[] = [];
-    if (j.imported != null) lines.push(`Imported ${j.imported} vendor(s).`);
-    if (j.message) {
-      if (Array.isArray(j.message)) lines.push(...j.message);
-      else lines.push(j.message);
-    }
-    if (j.errors?.length) lines.push(...j.errors.slice(0, 12));
-    setImportMsg(lines.join("\n") || "Import finished.");
-    void qc.invalidateQueries({ queryKey: ["vendors"] });
-    void qc.invalidateQueries({ queryKey: ["stats"] });
   }
 
   const exportIds = useMemo(() => {
@@ -685,6 +804,16 @@ export function VendorTable({
           {showBulkPrice ? <BulkPriceButton onApply={(p) => void bulkPrice(p)} /> : null}
           {scope !== "trash" ? (
             <>
+              {total > 0 ? (
+                <button
+                  type="button"
+                  className="btn-toolbar-outline"
+                  disabled={selectAllLoading}
+                  onClick={() => void selectAllMatching()}
+                >
+                  {selectAllLoading ? "Loading…" : `Select all matching (${total.toLocaleString()})`}
+                </button>
+              ) : null}
               {selected.size > 0 ? (
                 <button
                   type="button"
@@ -699,6 +828,7 @@ export function VendorTable({
                 className="btn-toolbar-outline"
                 onClick={() => {
                   setImportMsg(null);
+                  setImportSkippedDupUrls([]);
                   setImportOpen(true);
                 }}
               >
@@ -720,31 +850,46 @@ export function VendorTable({
                 Add vendor
               </Link>
             </>
-          ) : selected.size > 0 ? (
+          ) : (
             <>
-              <button
-                type="button"
-                className="btn-toolbar-outline"
-                onClick={() => void restoreSelectedVendors(Array.from(selected))}
-              >
-                Restore selected
-              </button>
-              <button
-                type="button"
-                className="inline-flex h-8 items-center rounded-lg border border-red-200 bg-red-50 px-3 text-sm font-medium text-red-800 shadow-sm transition hover:bg-red-100 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200 dark:hover:bg-red-950/45"
-                onClick={() => {
-                  const ids = [...selected];
-                  void (async () => {
-                    if (!ids.length) return;
-                    if (!(await showConfirm(`Permanently delete ${ids.length} site(s)? This cannot be undone.`))) return;
-                    await runPermanentDelete(ids);
-                  })();
-                }}
-              >
-                Delete selected
-              </button>
+              {total > 0 ? (
+                <button
+                  type="button"
+                  className="btn-toolbar-outline"
+                  disabled={selectAllLoading}
+                  onClick={() => void selectAllMatching()}
+                >
+                  {selectAllLoading ? "Loading…" : `Select all matching (${total.toLocaleString()})`}
+                </button>
+              ) : null}
+              {selected.size > 0 ? (
+                <>
+                  <button
+                    type="button"
+                    className="btn-toolbar-outline"
+                    onClick={() => void restoreSelectedVendors(Array.from(selected))}
+                  >
+                    Restore selected
+                  </button>
+                  <button
+                    type="button"
+                    className="inline-flex h-8 items-center rounded-lg border border-red-200 bg-red-50 px-3 text-sm font-medium text-red-800 shadow-sm transition hover:bg-red-100 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200 dark:hover:bg-red-950/45"
+                    onClick={() => {
+                      const ids = [...selected];
+                      void (async () => {
+                        if (!ids.length) return;
+                        if (!(await showConfirm(`Permanently delete ${ids.length} site(s)? This cannot be undone.`)))
+                          return;
+                        await runPermanentDelete(ids);
+                      })();
+                    }}
+                  >
+                    Delete selected
+                  </button>
+                </>
+              ) : null}
             </>
-          ) : null}
+          )}
         </div>
       </div>
 
@@ -1216,7 +1361,11 @@ export function VendorTable({
 
       <ImportSpreadsheetModal
         open={importOpen}
-        onClose={() => setImportOpen(false)}
+        onClose={() => {
+          setImportOpen(false);
+          setImportSkippedDupUrls([]);
+          setImportMsg(null);
+        }}
         title="Import vendors"
         subtitle="CSV file or a public Google Sheet link"
         token={token}
@@ -1225,6 +1374,11 @@ export function VendorTable({
         importMsg={importMsg}
         onPickCsv={(f) => void onImportCsv(f)}
         onImportFromSheet={() => void onImportFromSheet()}
+        importBusy={importBusy}
+        importProgressSummary={importBusy ? importProgressSummary : null}
+        onAbortImportFlow={() => importAbortRef.current?.abort()}
+        skippedDuplicateUrls={importSkippedDupUrls}
+        skippedDuplicatesDescription="These URLs are already in your vendors list (same site), so those rows were skipped."
       />
 
       {/* Bulk trash actions are shown in the top toolbar when rows are selected. */}
@@ -1238,8 +1392,6 @@ export function VendorTable({
         </div>
       ) : null}
 
-      {isLoading && <p className="mt-4">Loading…</p>}
-
       <div className="data-table-shell mt-4">
         <table className="min-w-full text-center text-[11px]">
           <thead className="data-table-thead">
@@ -1247,10 +1399,10 @@ export function VendorTable({
               <th className="w-10 p-2.5 align-middle">
                 <input
                   type="checkbox"
+                  title="Select rows on this page"
                   className="mx-auto block"
-                  checked={
-                    allIds.length > 0 && selected.size === allIds.length
-                  }
+                  disabled={isLoading}
+                  checked={allIds.length > 0 && allIds.every((id) => selected.has(id))}
                   onChange={toggleAll}
                 />
               </th>
@@ -1267,7 +1419,12 @@ export function VendorTable({
             </tr>
           </thead>
           <tbody>
-            {rows.map((r, rowIdx) => {
+            {isLoading ? (
+              <DataTableLoadingRow colSpan={vendorColSpan} />
+            ) : rows.length === 0 ? (
+              <DataTableEmptyRow colSpan={vendorColSpan} message={vendorEmptyMessage} />
+            ) : null}
+            {!isLoading && rows.length > 0 ? rows.map((r, rowIdx) => {
               const price =
                 typeof r.guestPostPrice === "object"
                   ? r.guestPostPrice.toString()
@@ -1369,8 +1526,20 @@ export function VendorTable({
                         items={
                           scope !== "trash"
                             ? ([
-                                { key: "v", type: "link", label: "View", href: `/vendors/${r.id}` },
-                                { key: "e", type: "link", label: "Edit", href: `/vendors/${r.id}/edit` },
+                                {
+                                  key: "v",
+                                  type: "link",
+                                  label: "View",
+                                  href: `/vendors/${r.id}`,
+                                  prefetchOnHover: () => prefetchVendorDetail(r.id),
+                                },
+                                {
+                                  key: "e",
+                                  type: "link",
+                                  label: "Edit",
+                                  href: `/vendors/${r.id}/edit`,
+                                  prefetchOnHover: () => prefetchVendorDetail(r.id),
+                                },
                                 {
                                   key: "d",
                                   type: "button",
@@ -1412,18 +1581,22 @@ export function VendorTable({
                   ) : null}
                 </tr>
               );
-            })}
+            }) : null}
           </tbody>
         </table>
       </div>
 
+      {!isLoading ? (
       <TablePagination
         page={page}
         totalPages={totalPages}
         limit={limit}
         onPageChange={setPage}
+        onLimitChange={setListLimit}
+        limitOptions={[50, 100, 200]}
         showLimitSelect={false}
       />
+      ) : null}
 
     </div>
   );

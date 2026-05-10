@@ -7,7 +7,7 @@ import { MoreVertical } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export type RowMenuItem =
-  | { key: string; type: "link"; label: string; href: string }
+  | { key: string; type: "link"; label: string; href: string; prefetchOnHover?: () => void }
   | { key: string; type: "button"; label: string; onClick: () => void; danger?: boolean };
 
 export function DataTableRowMenu({ items, a11yLabel = "Row actions" }: { items: RowMenuItem[]; a11yLabel?: string }) {
@@ -56,8 +56,10 @@ export function DataTableRowMenu({ items, a11yLabel = "Row actions" }: { items: 
             <li key={it.key} role="none">
               <Link
                 href={it.href}
+                prefetch={true}
                 className="block px-2.5 py-1.5 text-slate-800 hover:bg-slate-100 dark:text-slate-100 dark:hover:bg-slate-700/80"
                 role="menuitem"
+                onMouseEnter={() => it.prefetchOnHover?.()}
                 onClick={() => setOpen(false)}
               >
                 {it.label}

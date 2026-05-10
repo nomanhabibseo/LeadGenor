@@ -81,9 +81,7 @@ export class SubscriptionService {
     });
     const cur = row?.listsCreatedCount ?? 0;
     if (cur >= lim) {
-      throw new ForbiddenException(
-        `Free plan allows ${lim} new list(s) per month. Wait until next month or upgrade.`,
-      );
+      throw new ForbiddenException('Apni is month ki lists add karne ki free limit khatam ho chuki hai.');
     }
     await tx.subscriptionUsageMonth.upsert({
       where: { userId_ym: { userId, ym } },

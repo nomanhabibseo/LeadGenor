@@ -5,9 +5,9 @@ import { useRouter } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2 } from "lucide-react";
-import { MarketingHeader } from "@/components/marketing-header";
 import { apiFetch, apiUrl } from "@/lib/api";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect } from "react";
+
 const PAYPHONE = process.env.NEXT_PUBLIC_PAYMENT_SADAPAY_MSISDN || "03211174453";
 const WA_HREF =
   process.env.NEXT_PUBLIC_PAYMENT_WHATSAPP_URL ||
@@ -31,15 +31,6 @@ export default function OnboardingPlanPage() {
   const { data: session, status } = useSession();
   const token = session?.accessToken;
   const qc = useQueryClient();
-  const [fromDashboard, setFromDashboard] = useState(false);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const sp = new URLSearchParams(window.location.search);
-    setFromDashboard(sp.get("from") === "dashboard");
-  }, []);
-
-  const continueHref = useMemo(() => (fromDashboard ? "/dashboard" : "/login"), [fromDashboard]);
 
   const { data: plans } = useQuery({
     queryKey: ["subscriptions", "plans", token],
@@ -49,6 +40,7 @@ export default function OnboardingPlanPage() {
         token,
       ),
     enabled: !!token,
+    staleTime: 300_000,
   });
 
   const choose = useMutation({
@@ -66,58 +58,64 @@ export default function OnboardingPlanPage() {
     },
     onSuccess: async () => {
       await qc.invalidateQueries({ queryKey: ["users", "me"] });
-      // After selecting a paid plan from Pricing, users land here for manual payment instructions.
-      // We keep them here; they can go to dashboard from the header/nav.
       router.refresh();
     },
   });
 
+  useEffect(() => {
+    if (status === "unauthenticated") {
+      router.replace(`/login?callbackUrl=${encodeURIComponent("/onboarding/plan?from=dashboard")}`);
+    }
+  }, [status, router]);
+
   if (status === "loading") {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-slate-950 text-slate-100">
-        <Loader2 className="h-8 w-8 animate-spin text-violet-400" />
+      <div className="flex min-h-[40vh] items-center justify-center text-slate-500 dark:text-slate-400">
+        <Loader2 className="h-8 w-8 animate-spin" aria-hidden />
       </div>
     );
   }
 
   if (!token) {
     return (
-      <div className="flex min-h-screen flex-col items-center justify-center gap-4 bg-slate-950 px-4 text-center text-slate-100">
-        <p>Please sign in first.</p>
-        <Link href="/login" className="font-semibold text-violet-400 underline">
+      <div className="mx-auto max-w-md space-y-4 py-16 text-center text-slate-600 dark:text-slate-400">
+        <p>Please sign in to continue.</p>
+        <Link href="/login" className="font-semibold text-violet-700 underline hover:text-violet-900 dark:text-violet-300">
           Go to login
         </Link>
       </div>
     );
   }
 
-  return (
-    <div className="flex min-h-screen flex-col bg-slate-950 text-slate-100 dark:bg-black">
-      <div className="pointer-events-none fixed inset-0 bg-hero-mesh opacity-50 dark:opacity-35" aria-hidden />
-      <MarketingHeader />
-      <div className="relative z-10 mx-auto flex w-full max-w-4xl flex-col gap-10 px-4 py-10">
-        <div className="text-center">
-          <h1 className="text-2xl font-bold sm:text-3xl">Choose your plan</h1>
-          <p className="mt-2 text-sm text-slate-400">
-            Same account upgrades after payment — manual activation applies your Pro/Business privileges.
-          </p>
-        </div>
+  const continueHref = "/dashboard";
 
-        <div className="grid gap-4 sm:grid-cols-3">
-          {(plans?.plans ?? [
-            { tier: "FREE", title: "Free", priceUsd: null },
-            { tier: "PRO", title: "Pro", priceUsd: "12.99" },
-            { tier: "BUSINESS", title: "Business", priceUsd: "29.99" },
-          ]).map((p) => {
-            const pendingThis = choose.isPending && choose.variables === p.tier;
-            return (
+  return (
+    <div className="mx-auto max-w-4xl space-y-8 pb-8">
+      <div>
+        <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-white sm:text-3xl">
+          Activate your plan
+        </h1>
+        <p className="mt-2 max-w-2xl text-sm leading-relaxed text-slate-600 dark:text-slate-400">
+          Same account after payment — manual activation applies Pro/Business. Use <strong>Continue</strong> when you&apos;re
+          done to return to your dashboard.
+        </p>
+      </div>
+
+      <div className="grid gap-4 sm:grid-cols-3">
+        {(plans?.plans ?? [
+          { tier: "FREE", title: "Free", priceUsd: null },
+          { tier: "PRO", title: "Pro", priceUsd: "12.99" },
+          { tier: "BUSINESS", title: "Business", priceUsd: "29.99" },
+        ]).map((p) => {
+          const pendingThis = choose.isPending && choose.variables === p.tier;
+          return (
             <div
               key={p.tier}
-              className="flex flex-col rounded-2xl border border-white/10 bg-white/95 p-6 shadow-xl dark:border-slate-700/80 dark:bg-slate-800/95 dark:text-slate-100"
+              className="flex flex-col rounded-xl border border-slate-200 bg-white p-5 shadow-md dark:border-slate-700 dark:bg-slate-900/80 dark:text-slate-100"
             >
               <h2 className="text-lg font-bold text-slate-900 dark:text-white">{tierLabel(p.tier)}</h2>
-              <p className="mt-1 text-2xl font-bold text-brand-700 dark:text-cyan-400/90">
-                {p.priceUsd == null ? "PKR 0" : `$${p.priceUsd}/mo`}
+              <p className="mt-1 text-2xl font-bold text-violet-700 dark:text-cyan-400/90">
+                {p.priceUsd == null ? "$0" : `$${p.priceUsd}/mo`}
               </p>
               <p className="mt-3 flex-1 text-sm text-slate-600 dark:text-slate-300">
                 {p.tier === "FREE"
@@ -141,18 +139,18 @@ export default function OnboardingPlanPage() {
                   </button>
                 ) : (
                   <>
-                    <div className="rounded-xl border border-amber-200/80 bg-amber-50 px-3 py-2 text-xs text-amber-950 dark:border-amber-900/50 dark:bg-amber-950/40 dark:text-amber-100">
+                    <div className="rounded-xl border border-amber-200/90 bg-amber-50 px-3 py-2 text-xs text-amber-950 dark:border-amber-900/45 dark:bg-amber-950/35 dark:text-amber-50">
                       <p className="font-semibold">Pay manually</p>
                       <p className="mt-1">
                         Send payment to <span className="font-mono font-bold">Sadapay {PAYPHONE}</span>. Then WhatsApp your
-                        payment screenshot to the same number so we can activate <strong>{tierLabel(p.tier)}</strong> on
-                        this account.
+                        payment screenshot to the same number so we can activate <strong>{tierLabel(p.tier)}</strong> on this
+                        account.
                       </p>
                       <a
                         href={WA_HREF}
                         target="_blank"
                         rel="noreferrer"
-                        className="mt-2 inline-block font-semibold text-amber-900 underline dark:text-amber-200"
+                        className="mt-2 inline-block font-semibold text-amber-900 underline dark:text-amber-100"
                       >
                         Open WhatsApp
                       </a>
@@ -164,7 +162,7 @@ export default function OnboardingPlanPage() {
                         await choose.mutateAsync(p.tier);
                         router.push(continueHref);
                       }}
-                      className="w-full rounded-xl border border-slate-300 py-2.5 text-sm font-semibold text-slate-800 transition hover:bg-slate-100 disabled:opacity-60 dark:border-slate-600 dark:text-slate-100 dark:hover:bg-slate-700/60"
+                      className="w-full rounded-xl border border-slate-300 py-2.5 text-sm font-semibold text-slate-800 transition hover:bg-slate-50 disabled:opacity-60 dark:border-slate-600 dark:text-slate-100 dark:hover:bg-slate-800/70"
                     >
                       {pendingThis ? (
                         <Loader2 className="mx-auto h-4 w-4 animate-spin" />
@@ -173,28 +171,19 @@ export default function OnboardingPlanPage() {
                       )}
                     </button>
                     <p className="text-center text-[11px] text-slate-500 dark:text-slate-400">
-                      {fromDashboard ? (
-                        <>
-                          Continue will take you <span className="font-semibold">back to dashboard</span>.
-                        </>
-                      ) : (
-                        <>
-                          Continue will take you to <Link href="/login" className="font-semibold underline">Login</Link>.
-                        </>
-                      )}
+                      Continue returns you to the <span className="font-semibold">dashboard</span>.
                     </p>
                   </>
                 )}
               </div>
             </div>
-            );
-          })}
-        </div>
-
-        <p className="text-center text-xs text-slate-500">
-          Need help? Contact us on WhatsApp ({plans?.whatsappInstruction ?? PAYPHONE}).
-        </p>
+          );
+        })}
       </div>
+
+      <p className="text-center text-xs text-slate-500 dark:text-slate-400">
+        Need help? WhatsApp ({plans?.whatsappInstruction ?? PAYPHONE}).
+      </p>
     </div>
   );
 }

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSession } from "next-auth/react";
 import { ChevronDown, FileUp, Loader2 } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
@@ -13,6 +13,11 @@ import { FormSectionCard } from "@/components/form-section-card";
 import { RefIdChipsField } from "@/components/ref-id-chips-field";
 import { useReference } from "@/hooks/use-reference";
 import { apiFetch, apiUrl } from "@/lib/api";
+import {
+  extractSkippedExistingUrls,
+  formatImportExportResultLines,
+} from "@/lib/post-import-export";
+import { postImportNdjsonStream } from "@/lib/post-import-ndjson-stream";
 import { isDuplicateUrlResponse } from "@/lib/duplicate-url-error";
 import { parseEmailsClient } from "@/lib/emails-input";
 import { normalizeSiteUrlInput } from "@/lib/site-url";
@@ -62,6 +67,7 @@ export function ClientForm({ clientId }: { clientId?: string }) {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [findingEmail, setFindingEmail] = useState(false);
   const [findEmailMsg, setFindEmailMsg] = useState<string | null>(null);
+  const [emailFindNotFound, setEmailFindNotFound] = useState(false);
   const [nicheOpen, setNicheOpen] = useState(false);
   const [countryOpen, setCountryOpen] = useState(false);
   const [languageOpen, setLanguageOpen] = useState(false);
@@ -72,6 +78,10 @@ export function ClientForm({ clientId }: { clientId?: string }) {
   const [importOpen, setImportOpen] = useState(false);
   const [sheetUrl, setSheetUrl] = useState("");
   const [importMsg, setImportMsg] = useState<string | null>(null);
+  const [importSkippedDupUrls, setImportSkippedDupUrls] = useState<string[]>([]);
+  const [importBusy, setImportBusy] = useState(false);
+  const [importProgressSummary, setImportProgressSummary] = useState<string | null>(null);
+  const importAbortRef = useRef<AbortController | null>(null);
   const [saving, setSaving] = useState(false);
 
   function clearFieldError(key: string) {
@@ -208,71 +218,89 @@ export function ClientForm({ clientId }: { clientId?: string }) {
 
   async function onImportCsv(file: File | null) {
     setImportMsg(null);
+    setImportSkippedDupUrls([]);
+    setImportProgressSummary(null);
     if (!file || !token) return;
     const text = await file.text();
-    const res = await fetch(apiUrl("/import-export/clients/csv"), {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({ csv: text }),
-    });
-    const j = (await res.json().catch(() => ({}))) as {
-      message?: string | string[];
-      imported?: number;
-      errors?: string[];
-    };
-    if (!res.ok) {
-      const err = j.message;
-      const errText = Array.isArray(err) ? err.join(", ") : err;
-      setImportMsg(errText || "Import failed.");
-      return;
+    importAbortRef.current = new AbortController();
+    const signal = importAbortRef.current.signal;
+    setImportBusy(true);
+    try {
+      const r = await postImportNdjsonStream(
+        "/import-export/clients/csv/stream",
+        token,
+        { csv: text },
+        {
+          signal,
+          onProgress: ({ imported, total }) => {
+            setImportProgressSummary(
+              total != null && total > 0 ? `Imported ${imported} / ${total}` : `Imported ${imported}`,
+            );
+          },
+        },
+      );
+      if (!r.ok) {
+        if (r.cancelled) {
+          setImportMsg(null);
+          void qc.invalidateQueries({ queryKey: ["clients"] });
+          void qc.invalidateQueries({ queryKey: ["stats"] });
+          return;
+        }
+        setImportMsg(r.message);
+        return;
+      }
+      setImportMsg(formatImportExportResultLines(r.data));
+      setImportSkippedDupUrls(extractSkippedExistingUrls(r.data));
+      void qc.invalidateQueries({ queryKey: ["clients"] });
+      void qc.invalidateQueries({ queryKey: ["stats"] });
+    } finally {
+      setImportBusy(false);
+      setImportProgressSummary(null);
+      importAbortRef.current = null;
     }
-    const lines: string[] = [];
-    if (j.imported != null) lines.push(`Imported ${j.imported} client(s).`);
-    if (j.message) {
-      if (Array.isArray(j.message)) lines.push(...j.message);
-      else lines.push(j.message);
-    }
-    if (j.errors?.length) lines.push(...j.errors.slice(0, 12));
-    setImportMsg(lines.join("\n") || "Import finished.");
-    void qc.invalidateQueries({ queryKey: ["clients"] });
-    void qc.invalidateQueries({ queryKey: ["stats"] });
   }
 
   async function onImportFromSheet() {
     setImportMsg(null);
+    setImportSkippedDupUrls([]);
+    setImportProgressSummary(null);
     if (!token || !sheetUrl.trim()) return;
-    const res = await fetch(apiUrl("/import-export/clients/from-sheet"), {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({ url: sheetUrl.trim() }),
-    });
-    const j = (await res.json().catch(() => ({}))) as {
-      message?: string | string[];
-      imported?: number;
-      errors?: string[];
-    };
-    if (!res.ok) {
-      const err = j.message;
-      const errText = Array.isArray(err) ? err.join(", ") : err;
-      setImportMsg(errText || "Could not fetch sheet.");
-      return;
+    importAbortRef.current = new AbortController();
+    const signal = importAbortRef.current.signal;
+    setImportBusy(true);
+    try {
+      const r = await postImportNdjsonStream(
+        "/import-export/clients/from-sheet/stream",
+        token,
+        { url: sheetUrl.trim() },
+        {
+          signal,
+          onProgress: ({ imported, total }) => {
+            setImportProgressSummary(
+              total != null && total > 0 ? `Imported ${imported} / ${total}` : `Imported ${imported}`,
+            );
+          },
+        },
+      );
+      if (!r.ok) {
+        if (r.cancelled) {
+          setImportMsg(null);
+          void qc.invalidateQueries({ queryKey: ["clients"] });
+          void qc.invalidateQueries({ queryKey: ["stats"] });
+          return;
+        }
+        setImportMsg(r.message);
+        return;
+      }
+      setImportMsg(formatImportExportResultLines(r.data));
+      setImportSkippedDupUrls(extractSkippedExistingUrls(r.data));
+      void qc.invalidateQueries({ queryKey: ["clients"] });
+      void qc.invalidateQueries({ queryKey: ["stats"] });
+    } finally {
+      setImportBusy(false);
+      setImportProgressSummary(null);
+      importAbortRef.current = null;
     }
-    const lines: string[] = [];
-    if (j.imported != null) lines.push(`Imported ${j.imported} client(s).`);
-    if (j.message) {
-      if (Array.isArray(j.message)) lines.push(...j.message);
-      else lines.push(j.message);
-    }
-    if (j.errors?.length) lines.push(...j.errors.slice(0, 12));
-    setImportMsg(lines.join("\n") || "Import finished.");
-    void qc.invalidateQueries({ queryKey: ["clients"] });
-    void qc.invalidateQueries({ queryKey: ["stats"] });
   }
 
   if (sessionStatus === "loading") {
@@ -315,7 +343,11 @@ export function ClientForm({ clientId }: { clientId?: string }) {
     <div className="w-full max-w-5xl pb-10">
       <ImportSpreadsheetModal
         open={importOpen}
-        onClose={() => setImportOpen(false)}
+        onClose={() => {
+          setImportOpen(false);
+          setImportSkippedDupUrls([]);
+          setImportMsg(null);
+        }}
         title="Import clients"
         subtitle="CSV file or a public Google Sheet link"
         token={token}
@@ -324,6 +356,11 @@ export function ClientForm({ clientId }: { clientId?: string }) {
         importMsg={importMsg}
         onPickCsv={(f) => void onImportCsv(f)}
         onImportFromSheet={() => void onImportFromSheet()}
+        importBusy={importBusy}
+        importProgressSummary={importBusy ? importProgressSummary : null}
+        onAbortImportFlow={() => importAbortRef.current?.abort()}
+        skippedDuplicateUrls={importSkippedDupUrls}
+        skippedDuplicatesDescription="These URLs are already in your clients list (same site), so those rows were skipped."
       />
 
       {dupModal && (
@@ -484,6 +521,7 @@ export function ClientForm({ clientId }: { clientId?: string }) {
               type="button"
               onClick={() => {
                 setImportMsg(null);
+                setImportSkippedDupUrls([]);
                 setImportOpen(true);
               }}
               className="btn-toolbar-outline shrink-0 self-start"
@@ -653,9 +691,16 @@ export function ClientForm({ clientId }: { clientId?: string }) {
                 aria-invalid={fieldErrors.email ? "true" : undefined}
                 onChange={(email) => {
                   clearFieldError("email");
+                  setEmailFindNotFound(false);
+                  setFindEmailMsg(null);
                   setForm({ ...form, email });
                 }}
               />
+              {emailFindNotFound && !form.email.trim() && !findingEmail ? (
+                <span className="pointer-events-none absolute left-3 top-1/2 z-[1] max-w-[calc(100%-5.5rem)] -translate-y-1/2 truncate text-sm font-medium text-red-600 dark:text-red-400">
+                  not found
+                </span>
+              ) : null}
               {!form.email.trim() ? (
                 <button
                   type="button"
@@ -665,24 +710,26 @@ export function ClientForm({ clientId }: { clientId?: string }) {
                     const url = form.siteUrl.trim();
                     if (!url) {
                       setFindEmailMsg("Add site URL first.");
+                      setEmailFindNotFound(false);
                       return;
                     }
                     setFindEmailMsg(null);
+                    setEmailFindNotFound(false);
                     setFindingEmail(true);
                     try {
                       const r = await findEmailsFromUrl(token, url);
                       if (!r.emails?.length) {
-                        setFindEmailMsg("Not found");
+                        setEmailFindNotFound(true);
                         return;
                       }
                       setForm((f) => ({ ...f, email: r.emails.join(", ") }));
                     } catch {
-                      setFindEmailMsg("Not found");
+                      setEmailFindNotFound(true);
                     } finally {
                       setFindingEmail(false);
                     }
                   }}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:opacity-50 dark:border-slate-600 dark:bg-slate-900/60 dark:text-slate-200 dark:hover:bg-slate-800"
+                  className="absolute right-2 top-1/2 z-[2] -translate-y-1/2 rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:opacity-50 dark:border-slate-600 dark:bg-slate-900/60 dark:text-slate-200 dark:hover:bg-slate-800"
                   title="Find emails from the website"
                 >
                   {findingEmail ? "Finding…" : "Find email"}

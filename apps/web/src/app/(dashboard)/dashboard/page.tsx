@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSession } from "next-auth/react";
 import {
   BarChart2,
@@ -81,6 +81,24 @@ type HighlightVendors = {
 
 type HighlightResponse = HighlightOrders | HighlightClients | HighlightVendors | { kind: string; rows: unknown[] };
 
+const DASH_QUERY_STALE_MS = 60_000;
+
+const EMPTY_SNAPSHOT: Snapshot = {
+  runningCampaigns: 0,
+  completedCampaigns: 0,
+  scheduledCampaigns: 0,
+  totalVendors: 0,
+  dealDoneVendors: 0,
+  pendingDeals: 0,
+  vendorsLast30: 0,
+  totalClients: 0,
+  clientsLast30: 0,
+  totalOrders: 0,
+  completedOrders: 0,
+  pendingOrders: 0,
+  ordersLast30: 0,
+};
+
 function fmtUsd(n: number) {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(n);
 }
@@ -137,7 +155,6 @@ function SmallStat({
   children,
   iconBg,
   iconColor,
-  cardClass,
   hint,
 }: {
   title: string;
@@ -145,16 +162,10 @@ function SmallStat({
   children: React.ReactNode;
   iconBg: string;
   iconColor: string;
-  cardClass: string;
   hint?: React.ReactNode;
 }) {
   return (
-    <div
-      className={cn(
-        "relative overflow-hidden rounded-2xl border-2 p-4 shadow-md ring-1 ring-black/5",
-        cardClass,
-      )}
-    >
+    <div className="relative overflow-hidden rounded-2xl border border-blue-400/45 bg-white p-4 shadow-sm dark:border-blue-500/35 dark:bg-slate-900/95">
       <p className="text-xs font-medium text-slate-600 dark:text-slate-400">{title}</p>
       <p className="mt-1 text-2xl font-bold tabular-nums text-slate-900 dark:text-slate-100 sm:text-3xl">
         {typeof value === "number" ? fmtInt(value) : value}
@@ -184,7 +195,6 @@ function BigMetric({
   lineWidth = 1.25,
   chartVariant,
   icon,
-  cardClass,
   iconBoxClass,
 }: {
   title: string;
@@ -198,16 +208,10 @@ function BigMetric({
   lineWidth?: number;
   chartVariant: "line" | "bar";
   icon: React.ReactNode;
-  cardClass: string;
   iconBoxClass: string;
 }) {
   return (
-    <div
-      className={cn(
-        "flex h-full min-h-[260px] flex-col rounded-2xl border-2 p-4 shadow-md ring-1 ring-black/5 dark:shadow-none dark:ring-white/5 sm:min-h-[280px]",
-        cardClass,
-      )}
-    >
+    <div className="flex h-full min-h-[260px] flex-col rounded-2xl border border-blue-400/45 bg-white p-4 shadow-sm dark:border-blue-500/35 dark:bg-slate-900/95 sm:min-h-[280px]">
       <div className="flex items-start justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2.5">
           <div
@@ -255,7 +259,8 @@ function BigMetric({
 }
 
 export default function DashboardPage() {
-  const { data: session } = useSession();
+  const qc = useQueryClient();
+  const { data: session, status: sessionStatus } = useSession();
   const token = session?.accessToken;
   const displayName = firstName(session?.user?.name ?? undefined);
   const [ranges, setRanges] = useState(defaultRanges);
@@ -273,17 +278,26 @@ export default function DashboardPage() {
     }
   }, []);
 
-  const { data: snapshot, isLoading: snapshotLoading, isError: snapshotError } = useQuery({
+  const {
+    data: snapshot,
+    isLoading: snapshotLoading,
+    isError: snapshotError,
+    error: snapshotFetchError,
+    isFetching: snapshotFetching,
+    failureCount: snapshotFailureCount,
+  } = useQuery({
     queryKey: ["stats", "dashboard/snapshot", token],
     queryFn: () => apiFetch<Snapshot>("/stats/dashboard/snapshot", token),
-    enabled: !!token,
+    enabled: sessionStatus === "authenticated" && !!token,
+    staleTime: DASH_QUERY_STALE_MS,
   });
 
   const leadsQ = useQuery({
     queryKey: ["stats", "dashboard/metric", "leads", ranges.leads, token],
     queryFn: () =>
       apiFetch<LeadsMetric>(`/stats/dashboard/metric?k=leads&range=${encodeURIComponent(ranges.leads)}`, token),
-    enabled: !!token,
+    enabled: sessionStatus === "authenticated" && !!token,
+    staleTime: DASH_QUERY_STALE_MS,
   });
   const deliveryQ = useQuery({
     queryKey: ["stats", "dashboard/metric", "delivery", ranges.delivery, token],
@@ -292,25 +306,29 @@ export default function DashboardPage() {
         `/stats/dashboard/metric?k=delivery&range=${encodeURIComponent(ranges.delivery)}`,
         token,
       ),
-    enabled: !!token,
+    enabled: sessionStatus === "authenticated" && !!token,
+    staleTime: DASH_QUERY_STALE_MS,
   });
   const responseQ = useQuery({
     queryKey: ["stats", "dashboard/metric", "response", ranges.response, token],
     queryFn: () =>
       apiFetch<PctMetric>(`/stats/dashboard/metric?k=response&range=${encodeURIComponent(ranges.response)}`, token),
-    enabled: !!token,
+    enabled: sessionStatus === "authenticated" && !!token,
+    staleTime: DASH_QUERY_STALE_MS,
   });
   const revenueQ = useQuery({
     queryKey: ["stats", "dashboard/metric", "revenue", ranges.revenue, token],
     queryFn: () =>
       apiFetch<UsdMetric>(`/stats/dashboard/metric?k=revenue&range=${encodeURIComponent(ranges.revenue)}`, token),
-    enabled: !!token,
+    enabled: sessionStatus === "authenticated" && !!token,
+    staleTime: DASH_QUERY_STALE_MS,
   });
   const profitQ = useQuery({
     queryKey: ["stats", "dashboard/metric", "profit", ranges.profit, token],
     queryFn: () =>
       apiFetch<ProfitMetric>(`/stats/dashboard/metric?k=profit&range=${encodeURIComponent(ranges.profit)}`, token),
-    enabled: !!token,
+    enabled: sessionStatus === "authenticated" && !!token,
+    staleTime: DASH_QUERY_STALE_MS,
   });
 
   const highlightQ = useQuery({
@@ -320,10 +338,11 @@ export default function DashboardPage() {
         `/stats/dashboard/highlight?kind=${encodeURIComponent(highlightMode)}`,
         token,
       ),
-    enabled: !!token,
+    enabled: sessionStatus === "authenticated" && !!token,
+    staleTime: DASH_QUERY_STALE_MS,
   });
 
-  if (snapshotLoading && !snapshot) {
+  if (sessionStatus === "loading" || (sessionStatus === "authenticated" && !token)) {
     return (
       <div className="space-y-6">
         <div className="h-16 animate-pulse rounded-2xl bg-slate-200/80 dark:bg-slate-800/80" />
@@ -347,15 +366,31 @@ export default function DashboardPage() {
     );
   }
 
-  if (snapshotError || !snapshot) {
+  if (snapshotError && !snapshot) {
     return (
-      <p className="text-sm text-red-600 dark:text-red-400">
-        Could not load dashboard. Refresh or sign in again.
-      </p>
+      <div className="max-w-lg space-y-3 rounded-2xl border border-red-200 bg-red-50/90 p-4 text-sm shadow-sm dark:border-red-900/55 dark:bg-red-950/40">
+        <p className="font-semibold text-red-800 dark:text-red-100">Dashboard data could not be loaded.</p>
+        <p className="whitespace-pre-wrap text-red-700/95 dark:text-red-200/90">
+          {snapshotFetchError instanceof Error ? snapshotFetchError.message : String(snapshotFetchError ?? "Unknown error")}
+        </p>
+        <button
+          type="button"
+          disabled={snapshotFetching}
+          className="rounded-xl bg-red-900 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-white hover:bg-red-800 disabled:opacity-55 dark:bg-red-800 dark:hover:bg-red-700"
+          onClick={() =>
+            void qc.invalidateQueries({
+              predicate: (q) => Array.isArray(q.queryKey) && q.queryKey[0] === "stats",
+            })
+          }
+        >
+          {snapshotFetching ? "Retrying…" : "Retry"}
+        </button>
+      </div>
     );
   }
 
-  const s = snapshot;
+  const snapPending = snapshotLoading && !snapshot;
+  const s = snapshot ?? EMPTY_SNAPSHOT;
   const data = {
     leads: leadsQ.data as LeadsMetric | undefined,
     delivery: deliveryQ.data as PctMetric | undefined,
@@ -385,6 +420,11 @@ export default function DashboardPage() {
             </span>
             ! Here’s what’s happening with your business.
           </p>
+          {snapPending && snapshotFailureCount > 0 ? (
+            <p className="mt-2 text-xs text-amber-700 dark:text-amber-300/90">
+              Connecting to API (attempt {snapshotFailureCount + 1})… If this persists, ensure the API is running.
+            </p>
+          ) : null}
         </div>
       </div>
 
@@ -394,28 +434,25 @@ export default function DashboardPage() {
       <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
         <SmallStat
           title="Running campaigns"
-          value={s.runningCampaigns}
+          value={snapPending ? "—" : s.runningCampaigns}
           iconBg="bg-emerald-200/80 dark:bg-emerald-900/50"
           iconColor="text-emerald-600 dark:text-emerald-400"
-          cardClass="border-emerald-100/90 bg-gradient-to-br from-white to-emerald-50/60 dark:border-emerald-900/40 dark:from-slate-900/90 dark:to-emerald-950/35"
         >
           <Play className="h-5 w-5 fill-emerald-600 dark:fill-emerald-400" />
         </SmallStat>
         <SmallStat
           title="Completed campaigns"
-          value={s.completedCampaigns}
+          value={snapPending ? "—" : s.completedCampaigns}
           iconBg="bg-sky-200/80 dark:bg-sky-900/50"
           iconColor="text-sky-600 dark:text-sky-400"
-          cardClass="border-sky-100/90 bg-gradient-to-br from-white to-sky-50/60 dark:border-sky-900/40 dark:from-slate-900/90 dark:to-sky-950/35"
         >
           <CheckCircle2 className="h-5 w-5" />
         </SmallStat>
         <SmallStat
           title="Scheduled campaigns"
-          value={s.scheduledCampaigns}
+          value={snapPending ? "—" : s.scheduledCampaigns}
           iconBg="bg-amber-200/80 dark:bg-amber-900/50"
           iconColor="text-amber-600 dark:text-amber-400"
-          cardClass="border-amber-100/90 bg-gradient-to-br from-white to-amber-50/50 dark:border-amber-900/40 dark:from-slate-900/90 dark:to-amber-950/30"
         >
           <Clock className="h-5 w-5" />
         </SmallStat>
@@ -436,7 +473,6 @@ export default function DashboardPage() {
           color="#7c3aed"
           chartVariant="bar"
           icon={<Send className="h-[18px] w-[18px] text-violet-600 dark:text-violet-300" />}
-          cardClass="border-violet-200/60 bg-gradient-to-b from-violet-50/70 to-white dark:border-violet-800/50 dark:from-violet-950/40 dark:to-slate-900"
           iconBoxClass="bg-violet-100/90 text-violet-700 ring-1 ring-violet-200/50 dark:bg-violet-950/50 dark:text-violet-200 dark:ring-violet-800/50"
         />
         <BigMetric
@@ -451,7 +487,6 @@ export default function DashboardPage() {
           lineWidth={1.1}
           chartVariant="line"
           icon={<Mail className="h-[18px] w-[18px] text-sky-600 dark:text-sky-300" />}
-          cardClass="border-sky-200/50 bg-gradient-to-b from-sky-50/80 to-white dark:border-sky-800/50 dark:from-sky-950/40 dark:to-slate-900"
           iconBoxClass="bg-sky-100/80 text-sky-700 ring-1 ring-sky-200/40 dark:bg-sky-950/45 dark:text-sky-200 dark:ring-sky-800/45"
         />
         <BigMetric
@@ -468,7 +503,6 @@ export default function DashboardPage() {
           icon={
             <BarChart2 className="h-[18px] w-[18px] text-fuchsia-600 dark:text-fuchsia-300" />
           }
-          cardClass="border-fuchsia-200/45 bg-gradient-to-b from-fuchsia-50/70 to-white dark:border-fuchsia-900/40 dark:from-fuchsia-950/35 dark:to-slate-900"
           iconBoxClass="bg-fuchsia-100/80 text-fuchsia-700 ring-1 ring-fuchsia-200/40 dark:bg-fuchsia-950/45 dark:text-fuchsia-200 dark:ring-fuchsia-800/40"
         />
       </div>
@@ -489,14 +523,9 @@ export default function DashboardPage() {
           lineWidth={1.1}
           chartVariant="line"
           icon={<Package className="h-[18px] w-[18px] text-emerald-600 dark:text-emerald-300" />}
-          cardClass="border-emerald-200/50 bg-gradient-to-b from-emerald-50/80 to-white dark:border-emerald-900/45 dark:from-emerald-950/40 dark:to-slate-900"
           iconBoxClass="bg-emerald-100/80 text-emerald-700 ring-1 ring-emerald-200/50 dark:bg-emerald-950/45 dark:text-emerald-200 dark:ring-emerald-800/45"
         />
-        <div
-          className={cn(
-            "flex min-h-[260px] flex-col rounded-2xl border border-teal-200/50 bg-gradient-to-b from-teal-50/80 to-white p-4 shadow-sm dark:border-teal-900/45 dark:from-teal-950/40 dark:to-slate-900 dark:shadow-none sm:min-h-[280px]",
-          )}
-        >
+        <div className="flex min-h-[260px] flex-col rounded-2xl border border-blue-400/45 bg-white p-4 shadow-sm dark:border-blue-500/35 dark:bg-slate-900/95 sm:min-h-[280px]">
           <div className="flex items-start justify-between gap-2">
             <div className="flex min-w-0 items-center gap-2.5">
               <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-teal-100/90 text-teal-700 ring-1 ring-teal-200/50 dark:bg-teal-950/50 dark:text-teal-200 dark:ring-teal-800/50">
@@ -550,9 +579,9 @@ export default function DashboardPage() {
       <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
         <SmallStat
           title="Total vendors"
-          value={s.totalVendors}
+          value={snapPending ? "—" : s.totalVendors}
           hint={
-            s.vendorsLast30 > 0 ? (
+            snapPending ? undefined : s.vendorsLast30 > 0 ? (
               <span className="text-emerald-700 dark:text-emerald-300">
                 +{fmtInt(s.vendorsLast30)} from last 30 days
               </span>
@@ -562,25 +591,22 @@ export default function DashboardPage() {
           }
           iconBg="bg-violet-200/80 dark:bg-violet-900/50"
           iconColor="text-violet-600 dark:text-violet-400"
-          cardClass="border-violet-100/80 bg-gradient-to-br from-white to-violet-50/50 dark:border-violet-900/40 dark:from-slate-900/90 dark:to-violet-950/30"
         >
           <UserRound className="h-5 w-5" />
         </SmallStat>
         <SmallStat
           title="Deal done vendors"
-          value={s.dealDoneVendors}
+          value={snapPending ? "—" : s.dealDoneVendors}
           iconBg="bg-emerald-200/80 dark:bg-emerald-900/50"
           iconColor="text-emerald-600 dark:text-emerald-400"
-          cardClass="border-emerald-100/80 bg-gradient-to-br from-white to-emerald-50/50 dark:border-emerald-900/40 dark:from-slate-900/90 dark:to-emerald-950/30"
         >
           <CheckCircle2 className="h-5 w-5" />
         </SmallStat>
         <SmallStat
           title="Pending deals"
-          value={s.pendingDeals}
+          value={snapPending ? "—" : s.pendingDeals}
           iconBg="bg-amber-200/80 dark:bg-amber-900/50"
           iconColor="text-amber-600 dark:text-amber-400"
-          cardClass="border-amber-100/80 bg-gradient-to-br from-white to-amber-50/40 dark:border-amber-900/40 dark:from-slate-900/90 dark:to-amber-950/30"
         >
           <Clock className="h-5 w-5" />
         </SmallStat>
@@ -592,9 +618,9 @@ export default function DashboardPage() {
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <SmallStat
           title="Total clients"
-          value={s.totalClients}
+          value={snapPending ? "—" : s.totalClients}
           hint={
-            s.clientsLast30 > 0 ? (
+            snapPending ? undefined : s.clientsLast30 > 0 ? (
               <span className="text-emerald-700 dark:text-emerald-300">
                 +{fmtInt(s.clientsLast30)} from last 30 days
               </span>
@@ -604,15 +630,14 @@ export default function DashboardPage() {
           }
           iconBg="bg-violet-200/80 dark:bg-violet-900/50"
           iconColor="text-violet-600 dark:text-violet-400"
-          cardClass="border-violet-100/80 bg-gradient-to-br from-white to-violet-50/50 dark:border-violet-900/40 dark:from-slate-900/90 dark:to-violet-950/30"
         >
           <UserRound className="h-5 w-5" />
         </SmallStat>
         <SmallStat
           title="Total orders"
-          value={s.totalOrders}
+          value={snapPending ? "—" : s.totalOrders}
           hint={
-            s.ordersLast30 > 0 ? (
+            snapPending ? undefined : s.ordersLast30 > 0 ? (
               <span className="text-emerald-700 dark:text-emerald-300">
                 +{fmtInt(s.ordersLast30)} from last 30 days
               </span>
@@ -622,25 +647,22 @@ export default function DashboardPage() {
           }
           iconBg="bg-sky-200/80 dark:bg-sky-900/50"
           iconColor="text-sky-600 dark:text-sky-400"
-          cardClass="border-sky-100/80 bg-gradient-to-br from-white to-sky-50/50 dark:border-sky-900/40 dark:from-slate-900/90 dark:to-sky-950/30"
         >
           <ShoppingCart className="h-5 w-5" />
         </SmallStat>
         <SmallStat
           title="Completed orders"
-          value={s.completedOrders}
+          value={snapPending ? "—" : s.completedOrders}
           iconBg="bg-emerald-200/80 dark:bg-emerald-900/50"
           iconColor="text-emerald-600 dark:text-emerald-400"
-          cardClass="border-emerald-100/80 bg-gradient-to-br from-white to-emerald-50/50 dark:border-emerald-900/40 dark:from-slate-900/90 dark:to-emerald-950/30"
         >
           <CheckCircle2 className="h-5 w-5" />
         </SmallStat>
         <SmallStat
           title="Pending orders"
-          value={s.pendingOrders}
+          value={snapPending ? "—" : s.pendingOrders}
           iconBg="bg-amber-200/80 dark:bg-amber-900/50"
           iconColor="text-amber-600 dark:text-amber-400"
-          cardClass="border-amber-100/80 bg-gradient-to-br from-white to-amber-50/40 dark:border-amber-900/40 dark:from-slate-900/90 dark:to-amber-950/30"
         >
           <Clock className="h-5 w-5" />
         </SmallStat>

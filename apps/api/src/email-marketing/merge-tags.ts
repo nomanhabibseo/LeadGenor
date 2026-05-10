@@ -1,4 +1,7 @@
 import type { EmailListItem } from '@prisma/client';
+import { websiteNameFromSiteUrl } from '../common/website-name-from-url';
+
+export { websiteNameFromSiteUrl };
 
 /** Merge fields available in templates and campaign emails. */
 export const MERGE_FIELD_KEYS = [
@@ -14,12 +17,19 @@ export const MERGE_FIELD_KEYS = [
   'backlinks',
   'referring_domains',
   'site_url',
+  'website_name',
   'emails',
 ] as const;
 
 export type MergeFieldKey = (typeof MERGE_FIELD_KEYS)[number];
 
+function escapeRegExp(k: string): string {
+  return k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 export function buildMergeVars(item: EmailListItem): Record<string, string> {
+  const siteUrl = item.siteUrl ?? '';
+  const w = websiteNameFromSiteUrl(siteUrl);
   const emails = (item.emails as unknown as string[]) ?? [];
   const vendorOrClient =
     item.contactKind === 'VENDOR' ? item.contactName : item.contactKind === 'CLIENT' ? item.contactName : '';
@@ -35,7 +45,9 @@ export function buildMergeVars(item: EmailListItem): Record<string, string> {
     authority_score: String(item.authorityScore ?? 0),
     backlinks: String(item.backlinks ?? 0),
     referring_domains: String(item.referringDomains ?? 0),
-    site_url: item.siteUrl ?? '',
+    site_url: siteUrl,
+    website_name: w,
+    'website name': w,
     emails: emails.join(', '),
     contact_name: vendorOrClient,
   };
@@ -43,15 +55,16 @@ export function buildMergeVars(item: EmailListItem): Record<string, string> {
 
 export function applyMergeTemplate(template: string, vars: Record<string, string>): string {
   let out = template;
-  for (const [k, v] of Object.entries(vars)) {
-    const re = new RegExp(`\\{\\{\\s*${k}\\s*\\}\\}`, 'gi');
+  const entries = Object.entries(vars).sort((a, b) => b[0].length - a[0].length);
+  for (const [k, v] of entries) {
+    const re = new RegExp(`\\{\\{\\s*${escapeRegExp(k)}\\s*\\}\\}`, 'gi');
     out = out.replace(re, v);
   }
   return out;
 }
 
 export function missingMergeVars(template: string, vars: Record<string, string>): string[] {
-  const re = /\{\{\s*([\w_]+)\s*\}\}/g;
+  const re = /\{\{\s*([\w_]+(?:\s+[\w_]+)*)\s*\}\}/g;
   const missing: string[] = [];
   let m: RegExpExecArray | null;
   while ((m = re.exec(template)) !== null) {
