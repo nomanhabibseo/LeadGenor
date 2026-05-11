@@ -8,9 +8,11 @@ import {
 } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { EmailImapSyncService } from './email-imap-sync.service';
+import type { FetchedInboxMessage } from './email-oauth-mail.service';
 import { EmailOAuthMailService } from './email-oauth-mail.service';
 import { heavyEmailSchedulersEnabled } from '../common/email-schedulers-allow';
 import { NotificationsService } from '../notifications/notifications.service';
+import { isLikelyReplyToPriorOutbound } from './reply-detection-heuristics';
 
 function parseSenderAccountIds(raw: unknown): string[] {
   if (Array.isArray(raw)) {
@@ -36,9 +38,16 @@ function extractEmailFromFromHeader(from: string): string | null {
   return raw;
 }
 
+/** Completed campaigns only get reply backfill for recent sends (avoids ancient inbox noise). */
+const REPLY_SCAN_COMPLETED_MAX_AGE_MS = 90 * 86400000;
+
 /**
  * Polls sender mailboxes for inbound messages and marks matching campaign recipients as replied.
  * Uses IMAP (SMTP accounts), Gmail API, or Microsoft Graph depending on the account.
+ *
+ * Matching is conservative: only messages that look like replies (thread headers or Re:/Fwd: subject)
+ * and that arrived after we last sent to that recipient are counted. Campaigns must be RUNNING, PAUSED,
+ * or recently COMPLETED (so stats stay accurate after a campaign finishes).
  */
 @Injectable()
 export class CampaignReplyDetectionService {
@@ -74,20 +83,30 @@ export class CampaignReplyDetectionService {
   }
 
   private async scanAccountInbox(acc: EmailAccount): Promise<void> {
-    let rows: { fromAddr: string }[] = [];
+    let rows: FetchedInboxMessage[] = [];
     if (acc.provider === EmailAccountProvider.GMAIL_API) {
       rows = await this.oauthMail.fetchGmailMessages(acc, 'inbox', 50);
     } else if (acc.provider === EmailAccountProvider.OUTLOOK) {
       rows = await this.oauthMail.fetchGraphMessages(acc, 'inbox', 50);
     } else if (this.imapSync.hasImapCredentials(acc)) {
-      const full = await this.imapSync.fetchMailboxMessages(acc, 'inbox', 50);
-      rows = full;
+      rows = await this.imapSync.fetchMailboxMessages(acc, 'inbox', 50);
     } else {
       return;
     }
 
+    const completedSince = new Date(Date.now() - REPLY_SCAN_COMPLETED_MAX_AGE_MS);
     const campaigns = await this.prisma.campaign.findMany({
-      where: { userId: acc.userId, deletedAt: null, status: CampaignStatus.RUNNING },
+      where: {
+        userId: acc.userId,
+        deletedAt: null,
+        OR: [
+          { status: { in: [CampaignStatus.RUNNING, CampaignStatus.PAUSED, CampaignStatus.SCHEDULED] } },
+          {
+            status: CampaignStatus.COMPLETED,
+            OR: [{ completedAt: { gte: completedSince } }, { completedAt: null }],
+          },
+        ],
+      },
       select: { id: true, senderAccountIds: true },
     });
     const campaignIds = campaigns
@@ -95,33 +114,39 @@ export class CampaignReplyDetectionService {
       .map((c) => c.id);
     if (!campaignIds.length) return;
 
-    const fromSet = new Set<string>();
-    for (const r of rows) {
-      const e = extractEmailFromFromHeader(r.fromAddr);
-      if (e) fromSet.add(e);
-    }
     const selfNorm = acc.fromEmail?.trim().toLowerCase() ?? '';
-    for (const emailNorm of fromSet) {
+
+    for (const msg of rows) {
+      if (!isLikelyReplyToPriorOutbound(msg)) continue;
+
+      const emailNorm = extractEmailFromFromHeader(msg.fromAddr);
+      if (!emailNorm) continue;
       if (selfNorm && emailNorm === selfNorm) continue;
+
+      const receivedAt = msg.receivedAt;
+      if (Number.isNaN(receivedAt.getTime())) continue;
+
       const n = await this.prisma.campaignRecipient.updateMany({
         where: {
           replied: false,
           campaignId: { in: campaignIds },
           targetEmail: { equals: emailNorm, mode: 'insensitive' },
-          // Only mark replies for recipients we've actually sent to.
-          lastSentAt: { not: null },
+          lastSentAt: { not: null, lt: receivedAt },
           status: {
             in: [
               CampaignRecipientStatus.PENDING,
               CampaignRecipientStatus.QUEUED,
               CampaignRecipientStatus.ACTIVE,
+              CampaignRecipientStatus.COMPLETED,
             ],
           },
         },
         data: { replied: true },
       });
       if (n.count > 0) {
-        this.log.log(`Marked ${n.count} recipient(s) as replied (from ${emailNorm}, account ${acc.id}).`);
+        this.log.log(
+          `Marked ${n.count} recipient(s) as replied (from ${emailNorm}, msg ${msg.externalMessageId}, account ${acc.id}).`,
+        );
         await this.notifications.create(acc.userId, {
           kind: 'info',
           title: 'New reply received',

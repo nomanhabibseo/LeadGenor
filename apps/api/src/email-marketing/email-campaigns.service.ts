@@ -446,6 +446,7 @@ export class EmailCampaignsService {
       checkListEntries?: unknown;
       mainFlowGraph?: unknown;
       pauseReason?: string | null;
+      sendConflictPriority?: unknown;
     },
   ) {
     const c = await this.prisma.campaign.findFirst({ where: { id, userId, deletedAt: null } });
@@ -456,7 +457,7 @@ export class EmailCampaignsService {
     if (isPausedAfterRun) {
       const rec = body as Record<string, unknown>;
       const providedKeys = Object.keys(rec).filter((k) => rec[k] !== undefined);
-      const allowed = new Set(['dailyCampaignLimit', 'wizardStep']);
+      const allowed = new Set(['dailyCampaignLimit', 'wizardStep', 'sendConflictPriority']);
       const disallowed = providedKeys.filter((k) => !allowed.has(k));
       if (disallowed.length) {
         throw new BadRequestException(
@@ -470,6 +471,9 @@ export class EmailCampaignsService {
       }
       if (body.wizardStep !== undefined) {
         data.wizardStep = body.wizardStep as number;
+      }
+      if (body.sendConflictPriority !== undefined) {
+        data.sendConflictPriority = body.sendConflictPriority as Prisma.CampaignUpdateInput['sendConflictPriority'];
       }
       if (Object.keys(data).length === 0) {
         return c;
@@ -511,6 +515,7 @@ export class EmailCampaignsService {
       'stopFollowUpsOnReply',
       'stopCampaignOnCompanyReply',
       'dailyCampaignLimit',
+      'sendConflictPriority',
       'scheduledAt',
       'startedAt',
       'completedAt',
@@ -731,6 +736,11 @@ export class EmailCampaignsService {
             emailListItemId: it.id,
             phase: 'main',
             stepIndex: 0,
+            mainStepIndex: 0,
+            nextMainSendAt: nextSend,
+            followupPhase: 'idle',
+            followupStepIndex: 0,
+            nextFollowupSendAt: null,
             nextSendAt: nextSend,
             status: CampaignRecipientStatus.QUEUED,
             targetEmail: email,
@@ -860,6 +870,7 @@ export class EmailCampaignsService {
           );
         }
         if (!scheduleForFuture) {
+          const kick = new Date();
           await this.prisma.campaignRecipient.updateMany({
             where: {
               campaignId,
@@ -871,7 +882,7 @@ export class EmailCampaignsService {
                 ],
               },
             },
-            data: { nextSendAt: new Date() },
+            data: { nextSendAt: kick, nextMainSendAt: kick },
           });
         }
       }

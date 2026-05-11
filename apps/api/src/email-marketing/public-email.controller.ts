@@ -48,7 +48,13 @@ export class PublicEmailController {
           campaign: { userId: row.userId },
           targetEmail: { equals: row.emailNorm, mode: 'insensitive' },
         },
-        data: { status: CampaignRecipientStatus.UNSUBSCRIBED, nextSendAt: null },
+        data: {
+          status: CampaignRecipientStatus.UNSUBSCRIBED,
+          nextSendAt: null,
+          nextMainSendAt: null,
+          nextFollowupSendAt: null,
+          followupPhase: 'done',
+        },
       });
       const inner = unsubCard(
         `<h1 style="margin:0 0 0.75rem;font-size:1.25rem;color:#0f172a">You are unsubscribed</h1><p style="margin:0;color:#475569;line-height:1.5">You will not receive further marketing emails from this sender at this address.</p>`,

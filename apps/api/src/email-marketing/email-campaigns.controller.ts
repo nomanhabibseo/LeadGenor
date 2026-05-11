@@ -1,5 +1,5 @@
 import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
-import { CampaignStatus } from '@prisma/client';
+import { CampaignStatus, SendConflictPriority } from '@prisma/client';
 import { Type } from 'class-transformer';
 import {
   Allow,
@@ -99,6 +99,10 @@ class UpdateCampaignDto {
   @IsInt()
   @Min(1)
   dailyCampaignLimit?: number;
+
+  @IsOptional()
+  @IsEnum(SendConflictPriority)
+  sendConflictPriority?: SendConflictPriority;
 
   @IsOptional()
   @ValidateIf((_, v) => v !== null && v !== undefined && v !== '')

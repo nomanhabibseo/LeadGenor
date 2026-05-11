@@ -44,6 +44,7 @@ type Campaign = {
   stopFollowUpsOnReply: boolean;
   stopCampaignOnCompanyReply: boolean;
   dailyCampaignLimit: number | null;
+  sendConflictPriority?: "MAIN_FIRST" | "FOLLOWUP_FIRST";
   scheduledAt: string | null;
   checkListEntries?: unknown;
   pauseReason?: string | null;
@@ -289,6 +290,7 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
     stopFollowUpsOnReply: true,
     stopCampaignOnCompanyReply: true,
     dailyCampaignLimit: "" as string | number,
+    sendConflictPriority: "MAIN_FIRST" as "MAIN_FIRST" | "FOLLOWUP_FIRST",
   });
 
   async function warnIfSenderProblems() {
@@ -350,6 +352,8 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
       stopFollowUpsOnReply: camp.stopFollowUpsOnReply,
       stopCampaignOnCompanyReply: camp.stopCampaignOnCompanyReply,
       dailyCampaignLimit: camp.dailyCampaignLimit ?? "",
+      sendConflictPriority:
+        camp.sendConflictPriority === "FOLLOWUP_FIRST" ? "FOLLOWUP_FIRST" : "MAIN_FIRST",
     });
     if (camp.scheduledAt) {
       setScheduleLocal(toLocalInput(camp.scheduledAt));
@@ -1210,6 +1214,41 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
               onChange={(e) => setFlags({ ...flags, dailyCampaignLimit: e.target.value === "" ? "" : Number(e.target.value) })}
             />
           </div>
+          <div className="rounded-lg border border-slate-200 bg-white px-3 py-3 dark:border-slate-600 dark:bg-slate-800/55">
+            <p className={wizardFieldTitle}>When main sequence and follow-ups are both due the same moment</p>
+            <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+              Applies when sender pacing or caps mean only one of the two tracks can send first. Follow-Ups branch after your
+              anchor wait can run at the same time as later steps in your main sequence.
+            </p>
+            <div className="mt-3 space-y-2">
+              <label className={wizardOptionLabel}>
+                <input
+                  type="radio"
+                  name="sendConflictPriority"
+                  className="h-4 w-4 shrink-0"
+                  checked={flags.sendConflictPriority === "MAIN_FIRST"}
+                  disabled={isPausedFromRunning}
+                  onChange={() => setFlags({ ...flags, sendConflictPriority: "MAIN_FIRST" })}
+                />
+                <span className="min-w-0">
+                  Prefer <strong>main sequence</strong> first — try follow-ups with any remaining sender capacity afterward.
+                </span>
+              </label>
+              <label className={wizardOptionLabel}>
+                <input
+                  type="radio"
+                  name="sendConflictPriority"
+                  className="h-4 w-4 shrink-0"
+                  checked={flags.sendConflictPriority === "FOLLOWUP_FIRST"}
+                  disabled={isPausedFromRunning}
+                  onChange={() => setFlags({ ...flags, sendConflictPriority: "FOLLOWUP_FIRST" })}
+                />
+                <span className="min-w-0">
+                  Prefer <strong>follow-ups</strong> first — try main sequence sends after if capacity remains.
+                </span>
+              </label>
+            </div>
+          </div>
           <div className="flex flex-wrap items-center gap-4">
             <button type="button" className={wizardBackLinkClass} onClick={() => void persistBack()}>
               ← Back
@@ -1294,7 +1333,10 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
 
             <section>
               <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Sequence</h3>
-              <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">Same layout as the Sequence step (read-only preview).</p>
+              <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
+                Same layout as the Sequence step (read-only preview). Follow-Ups after your anchor wait run in parallel with later
+                main emails (see Schedule step if both are due at once).
+              </p>
               <div className="mt-2 max-h-[min(28rem,70vh)] overflow-y-auto overflow-x-hidden rounded-lg border border-slate-100 bg-slate-50/80 px-1 py-2 dark:border-slate-600/80 dark:bg-slate-900/40">
                 <SequenceFlowEditor readOnly variant="root" value={mainFlow} onChange={() => {}} templates={templates} />
               </div>
@@ -1338,6 +1380,14 @@ export function EmailCampaignWizardPage({ campaignId }: { campaignId: string }) 
                   ) : (
                     dailyLimitSummary
                   )}
+                </li>
+                <li>
+                  <span className="font-semibold text-slate-600 dark:text-slate-300">
+                    When main and follow-ups tie for the next send:{" "}
+                  </span>
+                  {flags.sendConflictPriority === "FOLLOWUP_FIRST"
+                    ? "Prefer follow-ups first"
+                    : "Prefer main sequence first"}
                 </li>
               </ul>
             </section>

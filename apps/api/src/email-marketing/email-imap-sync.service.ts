@@ -25,7 +25,26 @@ export type ImapInboxRow = {
   snippet: string;
   receivedAt: Date;
   bodyPreview: string;
+  inReplyTo?: string;
+  references?: string;
 };
+
+function envelopeThreadHeaders(env: unknown): { inReplyTo?: string; references?: string } {
+  if (!env || typeof env !== 'object') return {};
+  const e = env as Record<string, unknown>;
+  const join = (v: unknown): string | undefined => {
+    if (typeof v === 'string') return v.trim() || undefined;
+    if (Array.isArray(v)) {
+      const s = v.map(String).filter(Boolean).join(' ').trim();
+      return s || undefined;
+    }
+    return undefined;
+  };
+  return {
+    inReplyTo: join(e.inReplyTo),
+    references: join(e.references),
+  };
+}
 
 function formatFromAddr(env: FetchMessageObject['envelope']): string {
   const f = env?.from?.[0];
@@ -214,6 +233,7 @@ export class EmailImapSyncService {
             }
             if (Number.isNaN(receivedAt.getTime())) receivedAt = new Date();
             const snippet = stripNul(subject ? subject.slice(0, 240) : fromAddr ? `From ${fromAddr}` : '');
+            const th = envelopeThreadHeaders(msg.envelope);
             out.push({
               externalMessageId: stripNul(buildExternalId(msg, mailboxPath, uidValidity)),
               subject,
@@ -221,6 +241,7 @@ export class EmailImapSyncService {
               snippet,
               receivedAt,
               bodyPreview: snippet.slice(0, 500),
+              ...th,
             });
           }
         } catch (e) {

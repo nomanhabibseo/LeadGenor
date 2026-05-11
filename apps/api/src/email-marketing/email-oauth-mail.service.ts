@@ -7,6 +7,18 @@ import { htmlToPlainText } from './email-html-plain';
 
 export type MailboxFolder = 'inbox' | 'sent' | 'drafts';
 
+/** Inbox rows used for reply detection (threading headers optional). */
+export type FetchedInboxMessage = {
+  externalMessageId: string;
+  subject: string;
+  fromAddr: string;
+  snippet: string;
+  receivedAt: Date;
+  bodyPreview: string;
+  inReplyTo?: string;
+  references?: string;
+};
+
 @Injectable()
 export class EmailOAuthMailService {
   private readonly log = new Logger(EmailOAuthMailService.name);
@@ -257,9 +269,7 @@ export class EmailOAuthMailService {
     acc: EmailAccount,
     folder: MailboxFolder,
     maxResults: number,
-  ): Promise<
-    { externalMessageId: string; subject: string; fromAddr: string; snippet: string; receivedAt: Date; bodyPreview: string }[]
-  > {
+  ): Promise<FetchedInboxMessage[]> {
     const access = await this.ensureAccessToken(acc);
     const label = this.gmailLabelForFolder(folder);
     const listRes = await fetch(
@@ -273,17 +283,10 @@ export class EmailOAuthMailService {
     }
     const listJson = (await listRes.json()) as { messages?: { id: string }[] };
     const ids = listJson.messages ?? [];
-    const out: {
-      externalMessageId: string;
-      subject: string;
-      fromAddr: string;
-      snippet: string;
-      receivedAt: Date;
-      bodyPreview: string;
-    }[] = [];
+    const out: FetchedInboxMessage[] = [];
     for (const { id } of ids.slice(0, maxResults)) {
       const getRes = await fetch(
-        `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date`,
+        `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date&metadataHeaders=In-Reply-To&metadataHeaders=References`,
         { headers: { Authorization: `Bearer ${access}` } },
       );
       if (!getRes.ok) continue;
@@ -296,11 +299,15 @@ export class EmailOAuthMailService {
       let subject = '';
       let fromAddr = '';
       let dateHdr = '';
+      let inReplyTo = '';
+      let references = '';
       for (const h of msg.payload?.headers ?? []) {
         const n = h.name.toLowerCase();
         if (n === 'subject') subject = h.value || '';
         if (n === 'from') fromAddr = h.value || '';
         if (n === 'date') dateHdr = h.value || '';
+        if (n === 'in-reply-to') inReplyTo = h.value || '';
+        if (n === 'references') references = h.value || '';
       }
       const receivedAt = msg.internalDate
         ? new Date(Number(msg.internalDate))
@@ -315,6 +322,8 @@ export class EmailOAuthMailService {
         snippet,
         receivedAt: Number.isNaN(receivedAt.getTime()) ? new Date() : receivedAt,
         bodyPreview: snippet.slice(0, 500),
+        ...(inReplyTo.trim() ? { inReplyTo: inReplyTo.trim() } : {}),
+        ...(references.trim() ? { references: references.trim() } : {}),
       });
     }
     return out;
@@ -324,13 +333,17 @@ export class EmailOAuthMailService {
     acc: EmailAccount,
     folder: MailboxFolder,
     maxResults: number,
-  ): Promise<
-    { externalMessageId: string; subject: string; fromAddr: string; snippet: string; receivedAt: Date; bodyPreview: string }[]
-  > {
+  ): Promise<FetchedInboxMessage[]> {
     const access = await this.ensureAccessToken(acc);
     const wellKnown = this.graphFolderPath(folder);
-    const url = `https://graph.microsoft.com/v1.0/me/mailFolders/${wellKnown}/messages?$top=${maxResults}&$orderby=receivedDateTime desc&$select=id,subject,from,bodyPreview,receivedDateTime,snippet`;
-    const res = await fetch(url, { headers: { Authorization: `Bearer ${access}` } });
+    const base = `https://graph.microsoft.com/v1.0/me/mailFolders/${wellKnown}/messages?$top=${maxResults}&$orderby=receivedDateTime desc&$select=`;
+    const selectWithThread = `${base}id,subject,from,bodyPreview,receivedDateTime,snippet,internetMessageHeaders`;
+    const selectBasic = `${base}id,subject,from,bodyPreview,receivedDateTime,snippet`;
+    let res = await fetch(selectWithThread, { headers: { Authorization: `Bearer ${access}` } });
+    if (!res.ok && (res.status === 400 || res.status === 501)) {
+      this.log.debug(`Graph list without internetMessageHeaders (status ${res.status}); retrying basic select.`);
+      res = await fetch(selectBasic, { headers: { Authorization: `Bearer ${access}` } });
+    }
     if (!res.ok) {
       const t = await res.text();
       this.log.warn(`Graph list messages failed: ${res.status} ${t}`);
@@ -344,6 +357,7 @@ export class EmailOAuthMailService {
         bodyPreview?: string;
         receivedDateTime?: string;
         snippet?: string;
+        internetMessageHeaders?: { name?: string; value?: string }[];
       }[];
     };
     const rows = j.value ?? [];
@@ -354,6 +368,13 @@ export class EmailOAuthMailService {
           : m.from?.emailAddress?.address ?? '';
       const receivedAt = m.receivedDateTime ? new Date(m.receivedDateTime) : new Date();
       const snippet = m.snippet ?? m.bodyPreview ?? '';
+      let inReplyTo = '';
+      let references = '';
+      for (const h of m.internetMessageHeaders ?? []) {
+        const n = (h.name ?? '').toLowerCase();
+        if (n === 'in-reply-to') inReplyTo = (h.value ?? '').trim();
+        if (n === 'references') references = (h.value ?? '').trim();
+      }
       return {
         externalMessageId: m.id,
         subject: m.subject ?? '',
@@ -361,6 +382,8 @@ export class EmailOAuthMailService {
         snippet,
         receivedAt: Number.isNaN(receivedAt.getTime()) ? new Date() : receivedAt,
         bodyPreview: (m.bodyPreview ?? snippet).slice(0, 500),
+        ...(inReplyTo ? { inReplyTo } : {}),
+        ...(references ? { references } : {}),
       };
     });
   }

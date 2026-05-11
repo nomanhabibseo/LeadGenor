@@ -5,6 +5,7 @@ import {
   CampaignStatus,
   EmailAccount,
   EmailAccountProvider,
+  SendConflictPriority,
 } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { EmailAccountsService } from './email-accounts.service';
@@ -28,10 +29,29 @@ import {
 
 const API_PUBLIC = process.env.API_PUBLIC_URL || process.env.API_URL || 'http://127.0.0.1:4000';
 
-/**
- * In dev, a 1s poll + Prisma `connection_limit=1` (common on Supabase pooler) starves HTTP handlers — `/users/me`
- * proxy gets ECONNRESET (see terminal). Production keeps 1s for per-account send pacing. Override with `CAMPAIGN_SEND_TICK_MS`.
- */
+const FU_PHASE_IDLE = 'idle';
+const FU_PHASE_WAIT = 'wait';
+const FU_PHASE_ACTIVE = 'active';
+const FU_PHASE_DONE = 'done';
+
+function computeMirroredNextSendAt(data: {
+  nextMainSendAt: Date | null;
+  nextFollowupSendAt: Date | null;
+  followupPhase: string;
+}): Date | null {
+  const times: number[] = [];
+  if (data.nextMainSendAt != null) times.push(data.nextMainSendAt.getTime());
+  if (
+    data.followupPhase === FU_PHASE_WAIT ||
+    data.followupPhase === FU_PHASE_ACTIVE
+  ) {
+    if (data.nextFollowupSendAt != null) times.push(data.nextFollowupSendAt.getTime());
+    else if (data.followupPhase === FU_PHASE_ACTIVE) times.push(0);
+  }
+  if (!times.length) return null;
+  return new Date(Math.min(...times));
+}
+
 const CAMPAIGN_SEND_POLL_MS =
   Number.parseInt(process.env.CAMPAIGN_SEND_TICK_MS ?? '', 10) > 0
     ? Number.parseInt(process.env.CAMPAIGN_SEND_TICK_MS ?? '', 10)
@@ -53,6 +73,8 @@ function parseSenderAccountIds(raw: unknown): string[] {
   }
   return [];
 }
+
+type SendTrack = 'main' | 'followup';
 
 @Injectable()
 export class CampaignSendService {
@@ -79,59 +101,85 @@ export class CampaignSendService {
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private async advanceFollowupWaitAfterMainDelay(rec: any) {
+  private async advanceFollowupWaitIfDue(rec: any) {
     const camp = rec.campaign;
     const rule = getFollowUpV2(camp);
     if (!rule) {
       await this.prisma.campaignRecipient.update({
         where: { id: rec.id },
-        data: { status: CampaignRecipientStatus.COMPLETED, nextSendAt: null },
+        data: {
+          status: CampaignRecipientStatus.COMPLETED,
+          nextSendAt: null,
+          nextMainSendAt: null,
+          nextFollowupSendAt: null,
+          followupPhase: FU_PHASE_DONE,
+          phase: 'main',
+        },
       });
       await this.markCampaignCompletedIfIdle(camp.id);
       return;
     }
 
-    // Claim "followup_wait" row so only one tick advances it.
     const now = new Date();
     const claimed = await this.prisma.campaignRecipient.updateMany({
       where: {
         id: rec.id,
         status: CampaignRecipientStatus.QUEUED,
-        phase: 'followup_wait',
-        nextSendAt: { lte: now },
+        followupPhase: FU_PHASE_WAIT,
+        nextFollowupSendAt: { lte: now },
       },
       data: { status: CampaignRecipientStatus.ACTIVE },
     });
     if (claimed.count === 0) return;
 
-    // Decide branch after the anchor email wait window has elapsed.
-    // yes = opened but not replied; no = not opened.
     const opened = rec.opened === true;
     const replied = rec.replied === true;
     const branch = opened && !replied ? 'yes' : 'no';
     const chain = branch === 'yes' ? rule.yesChain : rule.noChain;
     if (!chain.length || !chain[0]?.templateId) {
+      const nextMir = computeMirroredNextSendAt({
+        nextMainSendAt: rec.nextMainSendAt as Date | null,
+        nextFollowupSendAt: null,
+        followupPhase: FU_PHASE_DONE,
+      });
       await this.prisma.campaignRecipient.update({
         where: { id: rec.id },
-        data: { status: CampaignRecipientStatus.COMPLETED, nextSendAt: null },
+        data: {
+          status:
+            rec.nextMainSendAt == null
+              ? CampaignRecipientStatus.COMPLETED
+              : CampaignRecipientStatus.QUEUED,
+          nextFollowupSendAt: null,
+          followupPhase: FU_PHASE_DONE,
+          followBranch: branch,
+          nextSendAt: nextMir,
+          phase: rec.nextMainSendAt == null ? 'main' : 'followup',
+        },
       });
-      await this.markCampaignCompletedIfIdle(camp.id);
+      await this.maybeMarkRecipientComplete(rec.id, camp.id);
       return;
     }
 
+    const nextMir = computeMirroredNextSendAt({
+      nextMainSendAt: rec.nextMainSendAt as Date | null,
+      nextFollowupSendAt: new Date(),
+      followupPhase: FU_PHASE_ACTIVE,
+    });
     await this.prisma.campaignRecipient.update({
       where: { id: rec.id },
       data: {
         phase: 'followup',
         followBranch: branch,
+        followupStepIndex: 0,
         stepIndex: 0,
-        nextSendAt: null,
+        nextFollowupSendAt: new Date(),
+        followupPhase: FU_PHASE_ACTIVE,
         status: CampaignRecipientStatus.QUEUED,
+        nextSendAt: nextMir,
       },
     });
   }
 
-  /** Release rows left ACTIVE after a crash mid-send (claim uses ACTIVE as a lock). */
   @Interval(120_000)
   async recoverStuckActiveRecipients() {
     if (!heavyEmailSchedulersEnabled()) return;
@@ -148,45 +196,41 @@ export class CampaignSendService {
     }
   }
 
-  /** Polling loop for due sends. Production default 1s; dev default 15s to avoid DB pool starvation. */
   @Interval(CAMPAIGN_SEND_POLL_MS)
   async tick() {
     if (!heavyEmailSchedulersEnabled()) return;
     if (this.tickRunning) return;
     this.tickRunning = true;
     try {
-    const now = new Date();
-    // Promote scheduled campaigns whose start time has arrived.
-    await this.prisma.campaign.updateMany({
-      where: {
-        deletedAt: null,
-        status: CampaignStatus.SCHEDULED,
-        scheduledAt: { lte: now },
-      },
-      data: { status: CampaignStatus.RUNNING, startedAt: now },
-    });
+      const now = new Date();
+      await this.prisma.campaign.updateMany({
+        where: {
+          deletedAt: null,
+          status: CampaignStatus.SCHEDULED,
+          scheduledAt: { lte: now },
+        },
+        data: { status: CampaignStatus.RUNNING, startedAt: now },
+      });
 
-    const followupWaitDue = await this.prisma.campaignRecipient.findMany({
-      where: {
-        status: CampaignRecipientStatus.QUEUED,
-        phase: 'followup_wait',
-        nextSendAt: { lte: now },
-        campaign: { is: { status: CampaignStatus.RUNNING, deletedAt: null } },
-      },
-      include: { campaign: true, emailListItem: true },
-      take: 25,
-      orderBy: [{ nextSendAt: { sort: 'asc', nulls: 'last' } }],
-    });
-    for (const rec of followupWaitDue) {
-      try {
-        await this.advanceFollowupWaitAfterMainDelay(rec);
-      } catch (e) {
-        this.log.error(`followup_wait ${rec.id}`, e);
+      const followupWaitDue = await this.prisma.campaignRecipient.findMany({
+        where: {
+          status: CampaignRecipientStatus.QUEUED,
+          followupPhase: FU_PHASE_WAIT,
+          nextFollowupSendAt: { lte: now },
+          campaign: { is: { status: CampaignStatus.RUNNING, deletedAt: null } },
+        },
+        include: { campaign: true, emailListItem: true },
+        take: 25,
+        orderBy: [{ nextFollowupSendAt: { sort: 'asc', nulls: 'last' } }],
+      });
+      for (const rec of followupWaitDue) {
+        try {
+          await this.advanceFollowupWaitIfDue(rec);
+        } catch (e) {
+          this.log.error(`followup_wait ${rec.id}`, e);
+        }
       }
-    }
 
-      // Recovery: if a campaign was previously deferred far into the future (e.g. old UTC-midnight logic),
-      // and the first email was never sent, bring a few rows back to "due" so the campaign can start.
       const deferred = await this.prisma.campaignRecipient.findMany({
         where: {
           status: CampaignRecipientStatus.QUEUED,
@@ -205,42 +249,115 @@ export class CampaignSendService {
         if (!acc) continue;
         await this.prisma.campaignRecipient.updateMany({
           where: { id: r.id, status: CampaignRecipientStatus.QUEUED },
-          data: { nextSendAt: null },
+          data: { nextSendAt: null, nextMainSendAt: null },
         });
       }
 
-    const due = await this.prisma.campaignRecipient.findMany({
-      where: {
-        /** Only QUEUED: ACTIVE is an in-flight lock; parallel ticks must not process the same row twice. */
-        status: CampaignRecipientStatus.QUEUED,
-        phase: { not: 'followup_wait' },
-        OR: [{ nextSendAt: null }, { nextSendAt: { lte: now } }],
-        campaign: { is: { status: CampaignStatus.RUNNING, deletedAt: null } },
-      },
-      include: {
-        campaign: true,
-        emailListItem: true,
-      },
-      take: 25,
-      orderBy: [{ nextSendAt: { sort: 'asc', nulls: 'first' } }],
-    });
+      const due = await this.prisma.campaignRecipient.findMany({
+        where: {
+          status: CampaignRecipientStatus.QUEUED,
+          OR: [
+            {
+              AND: [
+                { nextMainSendAt: { not: null } },
+                { nextMainSendAt: { lte: now } },
+              ],
+            },
+            {
+              AND: [
+                { followupPhase: FU_PHASE_ACTIVE },
+                {
+                  OR: [{ nextFollowupSendAt: null }, { nextFollowupSendAt: { lte: now } }],
+                },
+              ],
+            },
+          ],
+          campaign: { is: { status: CampaignStatus.RUNNING, deletedAt: null } },
+        },
+        include: {
+          campaign: true,
+          emailListItem: true,
+        },
+        take: 25,
+        orderBy: [{ nextSendAt: { sort: 'asc', nulls: 'first' } }],
+      });
 
-    for (const rec of due) {
-      try {
-        await this.processRecipient(rec);
-      } catch (e) {
-        this.log.error(`Recipient ${rec.id}`, e);
+      for (const rec of due) {
+        try {
+          await this.processRecipient(rec);
+        } catch (e) {
+          this.log.error(`Recipient ${rec.id}`, e);
+        }
       }
-    }
     } finally {
       this.tickRunning = false;
     }
   }
 
-  private async revertRecipientToQueued(recId: string, nextSendAt: Date | null) {
+  private async revertRecipientToQueued(
+    recId: string,
+    patch: { nextMainSendAt?: Date | null; nextFollowupSendAt?: Date | null; nextSendAt?: Date | null },
+  ) {
+    const row = await this.prisma.campaignRecipient.findUnique({
+      where: { id: recId },
+      select: {
+        nextMainSendAt: true,
+        nextFollowupSendAt: true,
+        followupPhase: true,
+      },
+    });
+    if (!row) return;
+    const nm = patch.nextMainSendAt !== undefined ? patch.nextMainSendAt : row.nextMainSendAt;
+    const nf = patch.nextFollowupSendAt !== undefined ? patch.nextFollowupSendAt : row.nextFollowupSendAt;
+    const mir =
+      patch.nextSendAt !== undefined
+        ? patch.nextSendAt
+        : computeMirroredNextSendAt({
+            nextMainSendAt: nm,
+            nextFollowupSendAt: nf,
+            followupPhase: row.followupPhase,
+          });
     await this.prisma.campaignRecipient.updateMany({
       where: { id: recId, status: CampaignRecipientStatus.ACTIVE },
-      data: { status: CampaignRecipientStatus.QUEUED, nextSendAt },
+      data: {
+        status: CampaignRecipientStatus.QUEUED,
+        ...(patch.nextMainSendAt !== undefined ? { nextMainSendAt: patch.nextMainSendAt } : {}),
+        ...(patch.nextFollowupSendAt !== undefined ? { nextFollowupSendAt: patch.nextFollowupSendAt } : {}),
+        nextSendAt: mir,
+      },
+    });
+  }
+
+  private async releaseActiveWithDeferBoth(recId: string, camp: { senderAccountIds: unknown; userId: string }) {
+    const deferUntil = await this.computeDeferUntil(
+      parseSenderAccountIds(camp.senderAccountIds),
+      camp.userId,
+    );
+    const now = Date.now();
+    const row = await this.prisma.campaignRecipient.findUnique({
+      where: { id: recId },
+      select: { nextMainSendAt: true, nextFollowupSendAt: true, followupPhase: true },
+    });
+    if (!row) return;
+    const mainWasDue =
+      row.nextMainSendAt != null && row.nextMainSendAt.getTime() <= now;
+    const fuWasDue =
+      row.followupPhase === FU_PHASE_ACTIVE &&
+      (row.nextFollowupSendAt == null || row.nextFollowupSendAt.getTime() <= now);
+    const nm = mainWasDue ? deferUntil : row.nextMainSendAt;
+    const nf = fuWasDue ? deferUntil : row.nextFollowupSendAt;
+    await this.prisma.campaignRecipient.updateMany({
+      where: { id: recId, status: CampaignRecipientStatus.ACTIVE },
+      data: {
+        status: CampaignRecipientStatus.QUEUED,
+        nextMainSendAt: nm,
+        nextFollowupSendAt: nf,
+        nextSendAt: computeMirroredNextSendAt({
+          nextMainSendAt: nm,
+          nextFollowupSendAt: nf,
+          followupPhase: row.followupPhase,
+        }),
+      },
     });
   }
 
@@ -255,28 +372,71 @@ export class CampaignSendService {
     if (alive?.status !== CampaignStatus.RUNNING) return;
 
     const now = new Date();
-    const preserveNext = rec.nextSendAt as Date | null;
+    const mainDue =
+      rec.nextMainSendAt != null && (rec.nextMainSendAt as Date).getTime() <= now.getTime();
+    const followupSendDue =
+      rec.followupPhase === FU_PHASE_ACTIVE &&
+      (rec.nextFollowupSendAt == null || (rec.nextFollowupSendAt as Date).getTime() <= now.getTime());
 
     const claimed = await this.prisma.campaignRecipient.updateMany({
       where: {
         id: rec.id,
         status: CampaignRecipientStatus.QUEUED,
-        OR: [{ nextSendAt: null }, { nextSendAt: { lte: now } }],
+        OR: [
+          {
+            AND: [
+              { nextMainSendAt: { not: null } },
+              { nextMainSendAt: { lte: now } },
+            ],
+          },
+          {
+            AND: [
+              { followupPhase: FU_PHASE_ACTIVE },
+              {
+                OR: [{ nextFollowupSendAt: null }, { nextFollowupSendAt: { lte: now } }],
+              },
+            ],
+          },
+        ],
       },
       data: { status: CampaignRecipientStatus.ACTIVE },
     });
     if (claimed.count === 0) return;
 
+    const deferAccounts = async () =>
+      this.computeDeferUntil(parseSenderAccountIds(camp.senderAccountIds), camp.userId);
+
     try {
-      await this.processRecipientAfterClaim(rec, camp, preserveNext);
+      if (mainDue && followupSendDue) {
+        const prio = camp.sendConflictPriority ?? SendConflictPriority.MAIN_FIRST;
+        const order: SendTrack[] =
+          prio === SendConflictPriority.FOLLOWUP_FIRST ? ['followup', 'main'] : ['main', 'followup'];
+        for (const track of order) {
+          const outcome = await this.processSendForTrack(rec, camp, track);
+          if (outcome === 'done') return;
+        }
+        await this.releaseActiveWithDeferBoth(rec.id, camp);
+        return;
+      }
+      if (mainDue) {
+        const outcome = await this.processSendForTrack(rec, camp, 'main');
+        if (outcome === 'done') return;
+        await this.revertRecipientToQueued(rec.id, { nextMainSendAt: await deferAccounts() });
+        return;
+      }
+      if (followupSendDue) {
+        const outcome = await this.processSendForTrack(rec, camp, 'followup');
+        if (outcome === 'done') return;
+        await this.revertRecipientToQueued(rec.id, { nextFollowupSendAt: await deferAccounts() });
+      }
     } catch (e) {
-      await this.revertRecipientToQueued(rec.id, preserveNext);
+      await this.revertRecipientToQueued(rec.id, {});
       throw e;
     }
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private async processRecipientAfterClaim(rec: any, camp: any, preserveNext: Date | null) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Prisma recipient + joined campaign JSON
+  private async processSendForTrack(rec: any, camp: any, track: SendTrack): Promise<'done' | 'defer'> {
     const suppressed = await this.prisma.emailSuppression.findUnique({
       where: {
         userId_emailNorm: { userId: camp.userId, emailNorm: rec.targetEmail.toLowerCase() },
@@ -285,54 +445,98 @@ export class CampaignSendService {
     if (suppressed) {
       await this.prisma.campaignRecipient.update({
         where: { id: rec.id },
-        data: { status: CampaignRecipientStatus.UNSUBSCRIBED, nextSendAt: null },
+        data: {
+          status: CampaignRecipientStatus.UNSUBSCRIBED,
+          nextSendAt: null,
+          nextMainSendAt: null,
+          nextFollowupSendAt: null,
+          followupPhase: FU_PHASE_DONE,
+        },
       });
-      return;
+      return 'done';
     }
 
     if (rec.replied === true) {
-      const stopFollowUp =
-        rec.phase === 'followup' &&
-        (camp.stopFollowUpsOnReply === true || camp.stopCampaignOnCompanyReply === true);
-      const stopMain = rec.phase === 'main' && camp.stopCampaignOnCompanyReply === true;
-      if (stopFollowUp || stopMain) {
+      if (camp.stopCampaignOnCompanyReply === true) {
         await this.prisma.campaignRecipient.update({
           where: { id: rec.id },
-          data: { status: CampaignRecipientStatus.COMPLETED, nextSendAt: null },
+          data: {
+            status: CampaignRecipientStatus.COMPLETED,
+            nextSendAt: null,
+            nextMainSendAt: null,
+            nextFollowupSendAt: null,
+            followupPhase: FU_PHASE_DONE,
+          },
         });
         await this.markCampaignCompletedIfIdle(camp.id);
-        return;
+        return 'done';
+      }
+      if (
+        camp.stopFollowUpsOnReply === true &&
+        track === 'followup' &&
+        rec.followupPhase !== FU_PHASE_IDLE &&
+        rec.followupPhase !== FU_PHASE_DONE
+      ) {
+        const row = await this.prisma.campaignRecipient.findUnique({
+          where: { id: rec.id },
+          select: { nextMainSendAt: true },
+        });
+        await this.prisma.campaignRecipient.update({
+          where: { id: rec.id },
+          data: {
+            followupPhase: FU_PHASE_DONE,
+            nextFollowupSendAt: null,
+            nextSendAt: computeMirroredNextSendAt({
+              nextMainSendAt: row?.nextMainSendAt ?? null,
+              nextFollowupSendAt: null,
+              followupPhase: FU_PHASE_DONE,
+            }),
+          },
+        });
+        await this.maybeMarkRecipientComplete(rec.id, camp.id);
+        return 'defer';
       }
     }
 
     const senderIds = parseSenderAccountIds(camp.senderAccountIds);
     if (!senderIds.length) {
       this.log.warn(`Campaign ${camp.id}: recipient ${rec.id} skipped — no sender accounts on campaign.`);
-      await this.revertRecipientToQueued(rec.id, preserveNext);
-      return;
+      return 'defer';
     }
 
     const followV2 = getFollowUpV2(camp);
-    const chain: ChainStep[] =
-      rec.phase === 'main'
-        ? resolveMainChainFromCampaign(camp)
-        : rec.phase === 'followup'
+    const mainChain: ChainStep[] = resolveMainChainFromCampaign(camp);
+
+    const followChain: ChainStep[] =
+      track === 'followup'
+        ? followV2
           ? (() => {
-              if (followV2) {
-                const b = rec.followBranch === 'yes' ? 'yes' : 'no';
-                return (b === 'yes' ? followV2.yesChain : followV2.noChain).filter((x) => x?.templateId);
-              }
-              return ((camp.followUpSequence as unknown as ChainStep[]) ?? []).filter((x) => x?.templateId);
+              const b = rec.followBranch === 'yes' ? 'yes' : 'no';
+              return (b === 'yes' ? followV2.yesChain : followV2.noChain).filter((x) => x?.templateId);
             })()
-          : [];
-    const step = chain[rec.stepIndex];
+          : ((camp.followUpSequence as unknown as ChainStep[]) ?? []).filter((x) => x?.templateId)
+        : [];
+
+    const chain = track === 'main' ? mainChain : followChain;
+    const stepIndex = track === 'main' ? rec.mainStepIndex : rec.followupStepIndex;
+    const step = chain[stepIndex];
     if (!step?.templateId) {
-      await this.prisma.campaignRecipient.update({
-        where: { id: rec.id },
-        data: { status: CampaignRecipientStatus.COMPLETED, nextSendAt: null },
-      });
-      await this.markCampaignCompletedIfIdle(camp.id);
-      return;
+      if (track === 'main') {
+        await this.prisma.campaignRecipient.update({
+          where: { id: rec.id },
+          data: {
+            status: CampaignRecipientStatus.COMPLETED,
+            nextSendAt: null,
+            nextMainSendAt: null,
+            nextFollowupSendAt: null,
+            followupPhase: FU_PHASE_DONE,
+          },
+        });
+        await this.markCampaignCompletedIfIdle(camp.id);
+        return 'done';
+      }
+      await this.finalizeFollowupTrackDone(rec.id, camp.id);
+      return 'done';
     }
 
     const template = await this.prisma.emailTemplate.findFirst({
@@ -341,20 +545,19 @@ export class CampaignSendService {
     if (!template) {
       await this.prisma.campaignRecipient.update({
         where: { id: rec.id },
-        data: { status: CampaignRecipientStatus.FAILED, failReason: 'Template missing' },
+        data: {
+          status: CampaignRecipientStatus.FAILED,
+          failReason: 'Template missing',
+          nextSendAt: null,
+          nextMainSendAt: null,
+          nextFollowupSendAt: null,
+        },
       });
-      return;
+      return 'done';
     }
 
     const acc = await this.pickEligibleSenderAccount(senderIds, camp.userId);
-    if (!acc) {
-      const deferUntil = await this.computeDeferUntil(senderIds, camp.userId);
-      this.log.debug(`Campaign ${camp.id}: no sender capacity — retry after ${deferUntil.toISOString()}`);
-      await this.revertRecipientToQueued(rec.id, deferUntil);
-      return;
-    }
-
-    const accountId = acc.id;
+    if (!acc) return 'defer';
 
     const canSmtp =
       (acc.provider === EmailAccountProvider.SMTP ||
@@ -369,8 +572,7 @@ export class CampaignSendService {
       this.log.warn(
         `Campaign ${camp.id}: account ${acc.id} (${acc.provider}) cannot send — configure SMTP password or OAuth.`,
       );
-      await this.revertRecipientToQueued(rec.id, preserveNext);
-      return;
+      return 'defer';
     }
 
     let smtpPass: string | null = null;
@@ -378,8 +580,7 @@ export class CampaignSendService {
       smtpPass = await this.accounts.getDecryptedPassword(acc.id);
       if (!smtpPass) {
         this.log.warn(`Campaign ${camp.id}: SMTP password missing for account ${acc.id}.`);
-        await this.revertRecipientToQueued(rec.id, preserveNext);
-        return;
+        return 'defer';
       }
     }
 
@@ -394,17 +595,34 @@ export class CampaignSendService {
       if (n >= camp.dailyCampaignLimit) {
         const nextDay = new Date(dayStart);
         nextDay.setDate(nextDay.getDate() + 1);
-        this.log.warn(
-          `Campaign ${camp.id}: daily cap ${camp.dailyCampaignLimit} reached for UTC day (${n} sends); deferring.`,
-        );
-        await this.revertRecipientToQueued(rec.id, nextDay);
-        return;
+        await this.prisma.campaignRecipient.updateMany({
+          where: { id: rec.id, status: CampaignRecipientStatus.ACTIVE },
+          data: {
+            status: CampaignRecipientStatus.QUEUED,
+            ...(track === 'main' ? { nextMainSendAt: nextDay } : { nextFollowupSendAt: nextDay }),
+          },
+        });
+        const fresh = await this.prisma.campaignRecipient.findUnique({
+          where: { id: rec.id },
+          select: { nextMainSendAt: true, nextFollowupSendAt: true, followupPhase: true },
+        });
+        await this.prisma.campaignRecipient.updateMany({
+          where: { id: rec.id },
+          data: {
+            nextSendAt: computeMirroredNextSendAt({
+              nextMainSendAt: fresh?.nextMainSendAt ?? null,
+              nextFollowupSendAt: fresh?.nextFollowupSendAt ?? null,
+              followupPhase: fresh?.followupPhase ?? FU_PHASE_IDLE,
+            }),
+          },
+        });
+        return 'done';
       }
     }
 
     if (/localhost|127\.0\.0\.1/i.test(API_PUBLIC)) {
       this.log.warn(
-        `API_PUBLIC_URL is "${API_PUBLIC}". Opens/unsubscribes will NOT track for real recipients. Set API_PUBLIC_URL to your public API domain.`,
+        `API_PUBLIC_URL is "${API_PUBLIC}". Opens/unsubscribes will NOT track for real recipients.`,
       );
     }
 
@@ -477,23 +695,19 @@ export class CampaignSendService {
           bcc: acc.bcc || undefined,
         });
       } else {
-        this.log.warn(`Campaign ${camp.id}: no send path for provider ${acc.provider} on account ${acc.id}.`);
-        await this.revertRecipientToQueued(rec.id, preserveNext);
-        return;
+        return 'defer';
       }
     } catch (e) {
       const msg =
-        e instanceof Error
-          ? e.message
-          : typeof e === 'string'
-            ? e
-            : 'Send failed';
+        e instanceof Error ? e.message : typeof e === 'string' ? e : 'Send failed';
       await this.prisma.campaignRecipient.update({
         where: { id: rec.id },
         data: {
           status: CampaignRecipientStatus.FAILED,
           failReason: msg.slice(0, 240),
           nextSendAt: null,
+          nextMainSendAt: null,
+          nextFollowupSendAt: null,
         },
       });
       try {
@@ -509,14 +723,13 @@ export class CampaignSendService {
           href: `/email-marketing/campaigns/${encodeURIComponent(camp.id)}`,
         });
       } catch {
-        // Notifications are best-effort; sending flow must not crash on notify failures.
+        // best-effort
       }
       this.log.warn(`Campaign ${camp.id}: send failed for recipient ${rec.id} via account ${acc.id}: ${msg}`);
       await this.markCampaignCompletedIfIdle(camp.id);
-      return;
+      return 'done';
     }
 
-    // Log for reporting (campaign → account usage).
     await this.prisma.campaignSendLog.create({
       data: {
         userId: camp.userId,
@@ -531,70 +744,227 @@ export class CampaignSendService {
     await this.accounts.incrementSent(acc.id, cooldownUntil);
 
     const sentAt = new Date();
-    const nextIdx = rec.stepIndex + 1;
+    if (track === 'main') {
+      await this.applyAfterMainSend(rec, camp, mainChain, followV2, sentAt, jitterMs, step);
+    } else {
+      await this.applyAfterFollowupSend(rec, followChain, sentAt, jitterMs, step);
+    }
+
+    return 'done';
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async applyAfterFollowupSend(rec: any, chain: ChainStep[], sentAt: Date, jitterMs: number, step: ChainStep) {
+    const nextFuIdx = rec.followupStepIndex + 1;
     const delayDays = step.delayDaysBeforeNext ?? 0;
     const base = Date.now() + delayDays * 86400000 + jitterMs;
 
-    /** Anchor email for follow-up v2 may be earlier in the spine than the last main email. */
-    const thisSendIsFollowupAnchor =
-      rec.phase === 'main' && !!followV2 && rec.stepIndex === followV2.afterEmailIndex;
-    const anchorForFollowupWait = thisSendIsFollowupAnchor
-      ? sentAt
-      : (rec.followupAnchorSentAt as Date | null) ?? sentAt;
+    if (nextFuIdx >= chain.length) {
+      const row = await this.prisma.campaignRecipient.findUnique({
+        where: { id: rec.id },
+        select: { nextMainSendAt: true },
+      });
+      const nextMir = computeMirroredNextSendAt({
+        nextMainSendAt: row?.nextMainSendAt ?? null,
+        nextFollowupSendAt: null,
+        followupPhase: FU_PHASE_DONE,
+      });
+      await this.prisma.campaignRecipient.update({
+        where: { id: rec.id },
+        data: {
+          followupPhase: FU_PHASE_DONE,
+          nextFollowupSendAt: null,
+          lastSentAt: sentAt,
+          status: CampaignRecipientStatus.QUEUED,
+          nextSendAt: nextMir,
+        },
+      });
+      await this.maybeMarkRecipientComplete(rec.id, rec.campaignId);
+      return;
+    }
 
-    if (nextIdx >= chain.length) {
-      if (rec.phase === 'main' && followV2) {
-        // Wait until `waitDays` after the anchor email (not necessarily the last main email), then branch.
-        const waitUntil = this.addDays(anchorForFollowupWait, Math.max(1, followV2.waitDays));
-        await this.prisma.campaignRecipient.update({
+    const nextFollow = new Date(base);
+    const row = await this.prisma.campaignRecipient.findUnique({
+      where: { id: rec.id },
+      select: { nextMainSendAt: true, followupPhase: true },
+    });
+    const nextMir = computeMirroredNextSendAt({
+      nextMainSendAt: row?.nextMainSendAt ?? null,
+      nextFollowupSendAt: nextFollow,
+      followupPhase: FU_PHASE_ACTIVE,
+    });
+    await this.prisma.campaignRecipient.update({
+      where: { id: rec.id },
+      data: {
+        followupStepIndex: nextFuIdx,
+        stepIndex: nextFuIdx,
+        nextFollowupSendAt: nextFollow,
+        lastSentAt: sentAt,
+        status: CampaignRecipientStatus.QUEUED,
+        nextSendAt: nextMir,
+      },
+    });
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async applyAfterMainSend(
+    rec: any,
+    camp: any,
+    mainChain: ChainStep[],
+    followV2: ReturnType<typeof getFollowUpV2>,
+    sentAt: Date,
+    jitterMs: number,
+    step: ChainStep,
+  ) {
+    const nextIdx = rec.mainStepIndex + 1;
+    const delayDays = step.delayDaysBeforeNext ?? 0;
+    const base = Date.now() + delayDays * 86400000 + jitterMs;
+
+    const thisSendIsFollowupAnchor =
+      !!followV2 && rec.mainStepIndex === followV2.afterEmailIndex;
+    const anchorForWait = thisSendIsFollowupAnchor
+      ? sentAt
+      : ((rec.followupAnchorSentAt as Date | null) ?? sentAt);
+
+    let followPatch: Record<string, unknown> = {};
+    if (thisSendIsFollowupAnchor && followV2 && rec.followupPhase === FU_PHASE_IDLE) {
+      const waitUntil = this.addDays(anchorForWait, Math.max(1, followV2.waitDays));
+      followPatch = {
+        followupPhase: FU_PHASE_WAIT,
+        nextFollowupSendAt: waitUntil,
+        followupAnchorSentAt: anchorForWait,
+      };
+    }
+
+    if (nextIdx >= mainChain.length) {
+      const nextMainAt: Date | null = null;
+      const mergedPhase = ((followPatch.followupPhase as string) ?? rec.followupPhase) as string;
+      const mergedFuNext = ((followPatch.nextFollowupSendAt as Date | undefined) ??
+        rec.nextFollowupSendAt) as Date | null;
+      let nextMir = computeMirroredNextSendAt({
+        nextMainSendAt: nextMainAt,
+        nextFollowupSendAt: mergedFuNext,
+        followupPhase: mergedPhase,
+      });
+      await this.prisma.campaignRecipient.update({
+        where: { id: rec.id },
+        data: {
+          mainStepIndex: rec.mainStepIndex,
+          stepIndex: rec.mainStepIndex,
+          nextMainSendAt: null,
+          phase: 'main',
+          lastSentAt: sentAt,
+          status: CampaignRecipientStatus.QUEUED,
+          nextSendAt: nextMir,
+          ...followPatch,
+        },
+      });
+      const legacyFu = ((camp.followUpSequence as unknown as ChainStep[]) ?? []).filter((x) => x?.templateId);
+      if (!followV2 && legacyFu.length) {
+        const nextLegacy = new Date(base);
+        const r2 = await this.prisma.campaignRecipient.findUnique({
           where: { id: rec.id },
-          data: {
-            phase: 'followup_wait',
-            followupAnchorSentAt: anchorForFollowupWait,
-            stepIndex: 0,
-            followBranch: null,
-            nextSendAt: waitUntil,
-            lastSentAt: sentAt,
-            status: CampaignRecipientStatus.QUEUED,
-          },
+          select: { nextMainSendAt: true, followupPhase: true, nextFollowupSendAt: true },
         });
-      } else if (rec.phase === 'main' && ((camp.followUpSequence as unknown as ChainStep[]) ?? []).length) {
+        nextMir = computeMirroredNextSendAt({
+          nextMainSendAt: r2?.nextMainSendAt ?? null,
+          nextFollowupSendAt: nextLegacy,
+          followupPhase: FU_PHASE_ACTIVE,
+        });
         await this.prisma.campaignRecipient.update({
           where: { id: rec.id },
           data: {
             phase: 'followup',
+            followupPhase: FU_PHASE_ACTIVE,
+            followupStepIndex: 0,
             stepIndex: 0,
-            nextSendAt: new Date(base),
-            lastSentAt: sentAt,
-            status: CampaignRecipientStatus.QUEUED,
+            nextFollowupSendAt: nextLegacy,
+            nextSendAt: nextMir,
           },
         });
-      } else {
-        await this.prisma.campaignRecipient.update({
-          where: { id: rec.id },
-          data: {
-            status: CampaignRecipientStatus.COMPLETED,
-            nextSendAt: null,
-            lastSentAt: sentAt,
-          },
-        });
-        await this.markCampaignCompletedIfIdle(camp.id);
       }
-    } else {
+      await this.maybeMarkRecipientComplete(rec.id, camp.id);
+      return;
+    }
+
+    const nextMainAt = new Date(base);
+    const mergedPhase = ((followPatch.followupPhase as string) ?? rec.followupPhase) as string;
+    const mergedFuNext = ((followPatch.nextFollowupSendAt as Date | undefined) ??
+      rec.nextFollowupSendAt) as Date | null;
+    const nextMir = computeMirroredNextSendAt({
+      nextMainSendAt: nextMainAt,
+      nextFollowupSendAt: mergedFuNext,
+      followupPhase: mergedPhase,
+    });
+    await this.prisma.campaignRecipient.update({
+      where: { id: rec.id },
+      data: {
+        mainStepIndex: nextIdx,
+        stepIndex: nextIdx,
+        nextMainSendAt: nextMainAt,
+        phase: 'main',
+        lastSentAt: sentAt,
+        status: CampaignRecipientStatus.QUEUED,
+        nextSendAt: nextMir,
+        ...followPatch,
+      },
+    });
+  }
+
+  private async finalizeFollowupTrackDone(recipientId: string, campaignId: string) {
+    const row = await this.prisma.campaignRecipient.findUnique({
+      where: { id: recipientId },
+      select: { nextMainSendAt: true },
+    });
+    await this.prisma.campaignRecipient.update({
+      where: { id: recipientId },
+      data: {
+        followupPhase: FU_PHASE_DONE,
+        nextFollowupSendAt: null,
+        nextSendAt: computeMirroredNextSendAt({
+          nextMainSendAt: row?.nextMainSendAt ?? null,
+          nextFollowupSendAt: null,
+          followupPhase: FU_PHASE_DONE,
+        }),
+        status:
+          row?.nextMainSendAt == null ? CampaignRecipientStatus.COMPLETED : CampaignRecipientStatus.QUEUED,
+      },
+    });
+    await this.maybeMarkRecipientComplete(recipientId, campaignId);
+  }
+
+  private async maybeMarkRecipientComplete(recipientId: string, campaignId: string) {
+    const r = await this.prisma.campaignRecipient.findUnique({
+      where: { id: recipientId },
+      select: {
+        status: true,
+        nextMainSendAt: true,
+        followupPhase: true,
+      },
+    });
+    if (!r || r.status !== CampaignRecipientStatus.QUEUED) return;
+    const followV2 = await this.prisma.campaign
+      .findUnique({ where: { id: campaignId }, select: { followUpStartRule: true } })
+      .then((c) => getFollowUpV2(c ?? {}));
+    const mainDone = r.nextMainSendAt == null;
+    const fuDone =
+      !followV2 ||
+      r.followupPhase === FU_PHASE_DONE ||
+      (Boolean(followV2) && mainDone && r.followupPhase === FU_PHASE_IDLE);
+    if (mainDone && fuDone) {
       await this.prisma.campaignRecipient.update({
-        where: { id: rec.id },
+        where: { id: recipientId },
         data: {
-          stepIndex: nextIdx,
-          nextSendAt: new Date(base),
-          lastSentAt: sentAt,
-          status: CampaignRecipientStatus.QUEUED,
-          ...(thisSendIsFollowupAnchor ? { followupAnchorSentAt: sentAt } : {}),
+          status: CampaignRecipientStatus.COMPLETED,
+          nextSendAt: null,
+          nextMainSendAt: null,
+          nextFollowupSendAt: null,
         },
       });
+      await this.markCampaignCompletedIfIdle(campaignId);
     }
   }
 
-  /** Pick sender with lowest utilization today (among under daily cap + not in inter-send cooldown). */
   private async pickEligibleSenderAccount(
     senderIds: string[],
     userId: string,
@@ -616,7 +986,6 @@ export class CampaignSendService {
     return cands[0]!.acc;
   }
 
-  /** When no account can send now: next UTC midnight if caps block, else earliest cooldown. */
   private async computeDeferUntil(senderIds: string[], userId: string): Promise<Date> {
     const now = Date.now();
     const d = new Date();
@@ -631,7 +1000,6 @@ export class CampaignSendService {
         earliest = Math.min(earliest, a.nextSendAllowedAt.getTime());
       }
     }
-    // Avoid artificially adding multiple seconds of extra delay; next tick is 1s.
     return new Date(Math.max(earliest, now + 1000));
   }
 

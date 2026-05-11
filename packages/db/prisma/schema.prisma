@@ -140,6 +140,12 @@ enum CampaignRecipientStatus {
   SKIPPED
 }
 
+/** When main-line and follow-up sends are both due, which track to try first under sender/campaign caps. */
+enum SendConflictPriority {
+  MAIN_FIRST
+  FOLLOWUP_FIRST
+}
+
 enum MultiEmailPolicy {
   ALL
   FIRST
@@ -315,6 +321,7 @@ model Campaign {
   stopFollowUpsOnReply     Boolean                @default(true)
   stopCampaignOnCompanyReply Boolean              @default(true)
   dailyCampaignLimit       Int?
+  sendConflictPriority     SendConflictPriority   @default(MAIN_FIRST)
   scheduledAt              DateTime?
   startedAt                DateTime?
   completedAt              DateTime?
@@ -341,10 +348,20 @@ model CampaignRecipient {
   emailListItem   EmailListItem             @relation(fields: [emailListItemId], references: [id], onDelete: Cascade)
   phase           String                    @default("main")
   stepIndex       Int                       @default(0)
+  /** Main sequence step index (parallel model). Legacy `stepIndex` when only main was used. */
+  mainStepIndex   Int                       @default(0)
+  /** Next main-line email due; null means no more main sends scheduled. */
+  nextMainSendAt  DateTime?
+  /** idle | wait | active | done — follow-up v2 / branch track (parallel with main). */
+  followupPhase   String                    @default("idle")
+  followupStepIndex Int                     @default(0)
+  /** Wait-until (phase wait) or next follow-up email due (phase active). */
+  nextFollowupSendAt DateTime?
   /** When the anchor email (follow-up v2) was sent; used to schedule wait after that send. */
   followupAnchorSentAt DateTime?
   /** follow_ups v2: "yes" = opened branch, "no" = not-opened branch; legacy followup uses null. */
   followBranch    String?
+  /** Earliest upcoming send among main/follow-up (for ordering and legacy queries). */
   nextSendAt      DateTime?
   lastSentAt      DateTime?
   status          CampaignRecipientStatus   @default(PENDING)
@@ -360,6 +377,8 @@ model CampaignRecipient {
 
   @@index([campaignId, emailListItemId])
   @@index([campaignId, nextSendAt, status])
+  @@index([campaignId, nextMainSendAt, status])
+  @@index([campaignId, nextFollowupSendAt, status])
 }
 
 model CampaignSendLog {
