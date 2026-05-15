@@ -1,0 +1,737 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  // Migrations use this: session pool (:5432 same pool host) or plain Postgres. Local: copy DATABASE_URL.
+  directUrl = env("DIRECT_URL")
+}
+
+enum TatUnit {
+  HOURS
+  DAYS
+}
+
+enum SubscriptionTier {
+  FREE
+  PRO
+  BUSINESS
+}
+
+enum DealStatus {
+  DEAL_DONE
+  PENDING
+}
+
+enum PaymentTerms {
+  ADVANCE
+  AFTER_LIVE_LINK
+}
+
+enum LinkType {
+  GUEST_POST
+  NICHE_EDIT
+}
+
+/** SEO rel / disclosure for placements (vendor default + per-order). */
+enum SeoLinkAttribute {
+  DO_FOLLOW
+  NO_FOLLOW
+  SPONSORED
+}
+
+enum OrderStatus {
+  COMPLETED
+  PENDING
+}
+
+model User {
+  id                 String   @id @default(cuid())
+  email              String   @unique
+  passwordHash       String?
+  name               String?
+  trashRetentionDays Int      @default(28)
+  /** light | dark | system */
+  themePreference    String   @default("system")
+  /** Per-module trash UI: { vendors?, clients?, ... } — omitted keys default to enabled */
+  trashToggles       Json?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  /** Stored tier from billing; FREE when expired past subscriptionEndsAt. */
+  subscriptionTier   SubscriptionTier @default(FREE)
+  /** Exclusive end instant for PAID tiers; unused for perpetual FREE users. */
+  subscriptionEndsAt DateTime?
+  /** When null, redirect to onboarding to pick Free / paid instruction flow. Existing users migrated to createdAt. */
+  planChosenAt       DateTime?
+
+  vendors Vendor[]
+  clients Client[]
+  orders  Order[]
+
+  emailLists               EmailList[]
+  templateFolders          TemplateFolder[]
+  emailTemplates           EmailTemplate[]
+  emailAccounts            EmailAccount[]
+  campaigns                Campaign[]
+  emailSuppressions        EmailSuppression[]
+  inboxMessages            InboxMessage[]
+  campaignSendLogs         CampaignSendLog[]
+  oauthStates              OAuthState[]
+  emailOAuthPendings       EmailOAuthPending[]
+  notifications            Notification[]
+  subscriptionUsageMonths  SubscriptionUsageMonth[]
+  emailFinderUsageUrls     EmailFinderUsageUrl[]
+  mailboxSyncUsages        MailboxSyncUsage[]
+}
+
+enum EmailListAutoUpdate {
+  OFF
+  DAILY
+  WEEKLY
+  MONTHLY
+}
+
+enum ListContactKind {
+  VENDOR
+  CLIENT
+  IMPORT
+}
+
+enum EmailRiskLevel {
+  UNKNOWN
+  UNVERIFIED
+  RISKY
+  INVALID
+  OK
+}
+
+enum EmailAccountProvider {
+  SMTP
+  GMAIL_API
+  GMAIL_SMTP
+  OUTLOOK
+  OTHER
+}
+
+enum SmtpEncryption {
+  SSL
+  TLS
+  NONE
+}
+
+enum CampaignStatus {
+  DRAFT
+  SCHEDULED
+  RUNNING
+  PAUSED
+  COMPLETED
+}
+
+enum CampaignRecipientStatus {
+  PENDING
+  QUEUED
+  ACTIVE
+  COMPLETED
+  FAILED
+  UNSUBSCRIBED
+  SKIPPED
+}
+
+/** When main-line and follow-up sends are both due, which track to try first under sender/campaign caps. */
+enum SendConflictPriority {
+  MAIN_FIRST
+  FOLLOWUP_FIRST
+}
+
+enum MultiEmailPolicy {
+  ALL
+  FIRST
+}
+
+enum MissingVariablePolicy {
+  TO_CHECK_LIST
+  SEND_ANYWAY
+}
+
+model EmailList {
+  id               String              @id @default(cuid())
+  userId           String
+  user             User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name             String
+  autoUpdate       EmailListAutoUpdate @default(OFF)
+  lastAutoUpdateAt DateTime?
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+  deletedAt        DateTime?
+
+  items     EmailListItem[]
+  campaigns Campaign[]
+
+  @@unique([userId, name])
+  @@index([userId, deletedAt])
+}
+
+model EmailListItem {
+  id                 String           @id @default(cuid())
+  listId             String
+  list               EmailList        @relation(fields: [listId], references: [id], onDelete: Cascade)
+  siteUrl            String
+  siteUrlNormalized  String
+  companyName        String           @default("")
+  contactName        String           @default("")
+  contactKind        ListContactKind  @default(IMPORT)
+  niche              String           @default("")
+  country            String           @default("")
+  traffic            Int              @default(0)
+  dr                 Int              @default(0)
+  da                 Int              @default(0)
+  authorityScore     Int              @default(0)
+  backlinks          Int              @default(0)
+  referringDomains   Int              @default(0)
+  emails             Json             @default("[]")
+  emailRisk          EmailRiskLevel   @default(UNKNOWN)
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+
+  campaignRecipients CampaignRecipient[]
+
+  @@index([listId, siteUrlNormalized])
+}
+
+model TemplateFolder {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  deletedAt DateTime?
+
+  templates EmailTemplate[]
+
+  @@index([userId, deletedAt])
+}
+
+model EmailTemplate {
+  id                      String          @id @default(cuid())
+  userId                  String
+  user                    User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  folderId                String
+  folder                  TemplateFolder  @relation(fields: [folderId], references: [id], onDelete: Cascade)
+  name                    String
+  subject                 String          @default("")
+  body                    String          @default("")
+  includeUnsubscribeBlock Boolean         @default(false)
+  createdAt               DateTime        @default(now())
+  updatedAt               DateTime        @updatedAt
+  deletedAt               DateTime?
+
+  @@index([folderId, deletedAt])
+  @@index([userId, deletedAt])
+}
+
+model EmailAccount {
+  id                   String               @id @default(cuid())
+  userId               String
+  user                 User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider             EmailAccountProvider @default(SMTP)
+  displayName          String
+  fromEmail            String
+  tag                  String
+  smtpHost             String?
+  smtpPort             Int?
+  smtpUser             String?
+  smtpPasswordEnc      String?
+  smtpEncryption       SmtpEncryption       @default(TLS)
+  oauthRefreshEnc      String?
+  oauthAccessEnc       String?
+  oauthExpiresAt       DateTime?
+  externalProviderId   String?
+  dailyLimit           Int                  @default(10)
+  delayMinSec          Int                  @default(200)
+  delayMaxSec          Int                  @default(200)
+  signature            String               @default("")
+  bcc                  String               @default("")
+  imapHost             String?
+  imapPort             Int?
+  imapUser             String?
+  imapPasswordEnc      String?
+  imapEncryption       SmtpEncryption       @default(TLS)
+  sentToday            Int                  @default(0)
+  /** Lifetime sends (campaign + similar); increments with each successful send. */
+  sentTotal            Int                  @default(0)
+  /** Earliest time this account may send the next message (per-account inter-send delay). */
+  nextSendAllowedAt    DateTime?
+  sentTodayDate        DateTime?            @db.Date
+  /** Set when SMTP (+ IMAP if configured) verification succeeds. */
+  connectionVerifiedAt DateTime?
+  /** Set when last verification failed or credentials are unusable. */
+  connectionInvalid    Boolean              @default(false)
+  /** When false, account is hidden from campaign sender pickers. */
+  campaignsEnabled     Boolean              @default(true)
+  createdAt            DateTime             @default(now())
+  updatedAt            DateTime             @updatedAt
+  deletedAt            DateTime?
+
+  inboxMessages InboxMessage[]
+  campaignSendLogs CampaignSendLog[]
+
+  @@unique([userId, tag])
+  @@index([userId, deletedAt])
+}
+
+model EmailOAuthPending {
+  id              String   @id @default(cuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider        String
+  refreshTokenEnc String
+  accessTokenEnc  String?
+  accessExpiresAt DateTime?
+  candidates      Json
+  createdAt       DateTime @default(now())
+  expiresAt       DateTime
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model Campaign {
+  id                       String                 @id @default(cuid())
+  userId                   String
+  user                     User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name                     String
+  emailListId              String
+  emailList                EmailList              @relation(fields: [emailListId], references: [id], onDelete: Restrict)
+  status                   CampaignStatus         @default(DRAFT)
+  wizardStep               Int                    @default(1)
+  senderAccountIds         Json                   @default("[]")
+  doNotSendUnverified      Boolean                @default(false)
+  doNotSendRisky           Boolean                @default(false)
+  doNotSendInvalid         Boolean                @default(false)
+  multiEmailPolicy         MultiEmailPolicy       @default(FIRST)
+  skipIfInOtherCampaign    Boolean                @default(false)
+  missingVariablePolicy    MissingVariablePolicy  @default(TO_CHECK_LIST)
+  mainSequence             Json                   @default("[]")
+  followUpSequence         Json                   @default("[]")
+  followUpStartRule        Json?
+  stopFollowUpsOnReply     Boolean                @default(true)
+  stopCampaignOnCompanyReply Boolean              @default(true)
+  dailyCampaignLimit       Int?
+  sendConflictPriority     SendConflictPriority   @default(MAIN_FIRST)
+  scheduledAt              DateTime?
+  startedAt                DateTime?
+  completedAt              DateTime?
+  checkListEntries         Json                   @default("[]")
+  pauseReason              String?
+  mainFlowGraph            Json?
+  createdAt                DateTime               @default(now())
+  updatedAt                DateTime               @updatedAt
+  deletedAt                DateTime?
+
+  recipients CampaignRecipient[]
+  sendLogs   CampaignSendLog[]
+
+  @@index([userId, status])
+  @@index([userId, deletedAt])
+  @@index([emailListId])
+}
+
+model CampaignRecipient {
+  id              String                    @id @default(cuid())
+  campaignId      String
+  campaign        Campaign                  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  emailListItemId String
+  emailListItem   EmailListItem             @relation(fields: [emailListItemId], references: [id], onDelete: Cascade)
+  phase           String                    @default("main")
+  stepIndex       Int                       @default(0)
+  /** Main sequence step index (parallel model). Legacy `stepIndex` when only main was used. */
+  mainStepIndex   Int                       @default(0)
+  /** Next main-line email due; null means no more main sends scheduled. */
+  nextMainSendAt  DateTime?
+  /** idle | wait | active | done — follow-up v2 / branch track (parallel with main). */
+  followupPhase   String                    @default("idle")
+  followupStepIndex Int                     @default(0)
+  /** Wait-until (phase wait) or next follow-up email due (phase active). */
+  nextFollowupSendAt DateTime?
+  /** When the anchor email (follow-up v2) was sent; used to schedule wait after that send. */
+  followupAnchorSentAt DateTime?
+  /** follow_ups v2: "yes" = opened branch, "no" = not-opened branch; legacy followup uses null. */
+  followBranch    String?
+  /** Earliest upcoming send among main/follow-up (for ordering and legacy queries). */
+  nextSendAt      DateTime?
+  lastSentAt      DateTime?
+  status          CampaignRecipientStatus   @default(PENDING)
+  opened          Boolean                   @default(false)
+  replied         Boolean                   @default(false)
+  failReason      String?
+  targetEmail     String                    @default("")
+  createdAt       DateTime                  @default(now())
+  updatedAt       DateTime                  @updatedAt
+
+  openEvents EmailOpenEvent[]
+  sendLogs   CampaignSendLog[]
+
+  @@index([campaignId, emailListItemId])
+  @@index([campaignId, nextSendAt, status])
+  @@index([campaignId, nextMainSendAt, status])
+  @@index([campaignId, nextFollowupSendAt, status])
+}
+
+model CampaignSendLog {
+  id            String      @id @default(cuid())
+  userId        String
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  campaignId    String
+  campaign      Campaign    @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  recipientId   String
+  recipient     CampaignRecipient @relation(fields: [recipientId], references: [id], onDelete: Cascade)
+  emailAccountId String
+  emailAccount  EmailAccount @relation(fields: [emailAccountId], references: [id], onDelete: Cascade)
+  targetEmail   String      @default("")
+  sentAt        DateTime    @default(now())
+
+  @@index([userId, campaignId, sentAt])
+  @@index([campaignId, emailAccountId])
+}
+
+model EmailOpenEvent {
+  id           String            @id @default(cuid())
+  recipientId  String
+  recipient    CampaignRecipient @relation(fields: [recipientId], references: [id], onDelete: Cascade)
+  createdAt    DateTime          @default(now())
+
+  @@index([recipientId])
+}
+
+model EmailSuppression {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  emailNorm String
+  reason    String   @default("unsubscribe")
+  createdAt DateTime @default(now())
+
+  @@unique([userId, emailNorm])
+}
+
+model UnsubscribeToken {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  userId    String
+  emailNorm String
+  expiresAt DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model InboxMessage {
+  id                 String        @id @default(cuid())
+  userId             String
+  user               User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  emailAccountId     String?
+  emailAccount       EmailAccount? @relation(fields: [emailAccountId], references: [id], onDelete: SetNull)
+  externalThreadId   String?
+  /** Provider message id (Gmail message id or Graph message id) for sync upsert. */
+  externalMessageId  String?
+  /** inbox | sent | drafts — normalized folder key after sync. */
+  folder             String        @default("inbox")
+  snippet            String        @default("")
+  fromAddr           String        @default("")
+  subject            String        @default("")
+  receivedAt         DateTime      @default(now())
+  campaignId         String?
+  bodyPreview        String        @default("")
+  createdAt          DateTime      @default(now())
+
+  @@index([userId, emailAccountId, folder, receivedAt])
+  @@unique([emailAccountId, externalMessageId])
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  kind      String   @default("info") // info | warning | error
+  title     String
+  message   String   @default("")
+  href      String?  // optional deep link in app
+  readAt    DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([userId, readAt, createdAt])
+  @@index([userId, createdAt])
+}
+
+model OAuthState {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider  String
+  state     String   @unique
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+}
+
+model Currency {
+  id            String         @id @default(cuid())
+  code          String         @unique
+  symbol        String
+  name          String
+  sortOrder     Int            @default(0)
+  vendors       Vendor[]
+  orders        Order[]
+  exchangeRates ExchangeRate[]
+}
+
+model Niche {
+  id       String         @id @default(cuid())
+  slug     String         @unique
+  label    String
+  sortOrder Int           @default(0)
+  vendors  VendorNiche[]
+  clients  ClientNiche[]
+}
+
+model Country {
+  id       String          @id @default(cuid())
+  code     String          @unique
+  name     String
+  sortOrder Int            @default(0)
+  vendors  VendorCountry[]
+  clients  ClientCountry[]
+}
+
+model Language {
+  id      String   @id @default(cuid())
+  code    String   @unique
+  name    String
+  sortOrder Int    @default(0)
+  vendors Vendor[]
+  clients Client[]
+}
+
+model PaymentMethod {
+  id       String                @id @default(cuid())
+  slug     String                @unique
+  label    String
+  sortOrder Int                  @default(0)
+  vendors  VendorPaymentMethod[]
+}
+
+model PaymentTermAfterLiveOption {
+  id        String   @id @default(cuid())
+  label     String
+  sortOrder Int      @default(0)
+  vendors   Vendor[]
+}
+
+model Vendor {
+  id                String    @id @default(cuid())
+  userId            String
+  user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  companyName       String
+  siteUrl           String
+  siteUrlNormalized String
+  traffic           Int       @default(0)
+  dr                Int       @default(0)
+  mozDa             Int       @default(0)
+  authorityScore    Int       @default(0)
+  referringDomains  Int       @default(0)
+  backlinks         Int       @default(0)
+  trustFlow         Int       @default(0)
+  seoLinkAttribute  SeoLinkAttribute @default(DO_FOLLOW)
+  seoLinkQuantity   Int       @default(1)
+  tatUnit           TatUnit
+  tatValue          Int
+  currencyId        String
+  currency          Currency  @relation(fields: [currencyId], references: [id])
+  guestPostCost     Decimal   @db.Decimal(18, 4)
+  nicheEditCost     Decimal   @db.Decimal(18, 4)
+  guestPostPrice    Decimal   @db.Decimal(18, 4)
+  nicheEditPrice    Decimal   @db.Decimal(18, 4)
+  paymentTerms      PaymentTerms
+  afterLiveOptionId String?
+  afterLiveOption   PaymentTermAfterLiveOption? @relation(fields: [afterLiveOptionId], references: [id])
+  contactEmail      String
+  contactPageUrl    String?
+  dealStatus        DealStatus
+  recordDate        DateTime?
+  notes             String?
+  languageId        String
+  language          Language  @relation(fields: [languageId], references: [id])
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  deletedAt         DateTime?
+
+  niches           VendorNiche[]
+  countries        VendorCountry[]
+  paymentMethods   VendorPaymentMethod[]
+  orders           Order[]
+
+  @@index([userId, siteUrlNormalized])
+  @@index([userId, dealStatus])
+  @@index([userId, deletedAt])
+}
+
+model VendorNiche {
+  vendorId String
+  nicheId  String
+  vendor   Vendor @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  niche    Niche  @relation(fields: [nicheId], references: [id], onDelete: Cascade)
+
+  @@id([vendorId, nicheId])
+}
+
+model VendorCountry {
+  vendorId  String
+  countryId String
+  vendor    Vendor  @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  country   Country @relation(fields: [countryId], references: [id], onDelete: Cascade)
+
+  @@id([vendorId, countryId])
+}
+
+model VendorPaymentMethod {
+  vendorId          String
+  paymentMethodId   String
+  vendor            Vendor          @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  paymentMethod     PaymentMethod   @relation(fields: [paymentMethodId], references: [id], onDelete: Cascade)
+
+  @@id([vendorId, paymentMethodId])
+}
+
+model Client {
+  id                String    @id @default(cuid())
+  userId            String
+  user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  companyName       String
+  clientName        String
+  siteUrl           String
+  siteUrlNormalized String
+  traffic           Int       @default(0)
+  dr                Int       @default(0)
+  mozDa             Int       @default(0)
+  authorityScore    Int       @default(0)
+  referringDomains  Int       @default(0)
+  backlinks         Int       @default(0)
+  email             String
+  whatsapp          String?
+  languageId        String
+  language          Language  @relation(fields: [languageId], references: [id])
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  deletedAt         DateTime?
+
+  niches    ClientNiche[]
+  countries ClientCountry[]
+  orders    Order[]
+
+  @@index([userId, siteUrlNormalized])
+  @@index([userId, deletedAt])
+}
+
+model ClientNiche {
+  clientId String
+  nicheId  String
+  client   Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  niche    Niche  @relation(fields: [nicheId], references: [id], onDelete: Cascade)
+
+  @@id([clientId, nicheId])
+}
+
+model ClientCountry {
+  clientId  String
+  countryId String
+  client    Client  @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  country   Country @relation(fields: [countryId], references: [id], onDelete: Cascade)
+
+  @@id([clientId, countryId])
+}
+
+model Order {
+  id                   String       @id @default(cuid())
+  userId               String
+  user                 User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  clientId             String
+  client               Client       @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  vendorId             String
+  vendor               Vendor       @relation(fields: [vendorId], references: [id], onDelete: Restrict)
+  linkType             LinkType
+  seoLinkAttribute     SeoLinkAttribute @default(DO_FOLLOW)
+  seoLinkQuantity      Int          @default(1)
+  resellerPrice        Decimal      @db.Decimal(18, 4)
+  vendorCost           Decimal      @db.Decimal(18, 4)
+  articleWriting       Boolean      @default(false)
+  articleWritingFeeUsd Decimal?     @db.Decimal(18, 4)
+  totalPayment         Decimal      @db.Decimal(18, 4)
+  paymentTerms         PaymentTerms
+  deliveryDays         Int
+  status               OrderStatus
+  orderDate            DateTime
+  clientEmail          String
+  currencyId           String
+  currency             Currency     @relation(fields: [currencyId], references: [id])
+  paymentMethodNote    String?
+  createdAt            DateTime     @default(now())
+  updatedAt            DateTime     @updatedAt
+  deletedAt            DateTime?
+
+  @@index([userId, status, orderDate])
+  @@index([userId, deletedAt])
+  @@index([vendorId])
+  @@index([clientId])
+}
+
+model ExchangeRate {
+  id          String   @id @default(cuid())
+  currencyId  String
+  currency    Currency @relation(fields: [currencyId], references: [id], onDelete: Cascade)
+  date        DateTime @db.Date
+  usdPerUnit  Decimal  @db.Decimal(18, 8)
+
+  @@unique([currencyId, date])
+  @@index([date])
+}
+
+/** Monotonic quota counters per user per calendar month (UTC). Deletes do not roll back counters. */
+model SubscriptionUsageMonth {
+  id                   String @id @default(cuid())
+  userId               String
+  user                 User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /** YYYY-MM (UTC). */
+  ym                   String
+
+  listsCreatedCount     Int @default(0)
+  prospectsAddedCount   Int @default(0)
+  campaignsCreatedCount Int @default(0)
+  mailboxSyncCount      Int @default(0)
+
+  @@unique([userId, ym])
+  @@index([userId, ym])
+}
+
+/** Unique finder site URLs billed per UTC month toward plan limits. */
+model EmailFinderUsageUrl {
+  id      String @id @default(cuid())
+  userId  String
+  user    User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ym      String
+  urlNorm String
+
+  @@unique([userId, ym, urlNorm])
+  @@index([userId, ym])
+}
+
+model MailboxSyncUsage {
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ym     String
+  count  Int    @default(0)
+
+  @@id([userId, ym])
+}
